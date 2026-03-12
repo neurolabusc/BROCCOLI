@@ -66,6 +66,7 @@ struct MetalContext {
                 @"src/shaders/registration.metal",
                 @"shaders/registration.metal",
                 @"registration.metal",
+                @"metal-registration/src/shaders/registration.metal",
             ];
 
             NSFileManager* fm = [NSFileManager defaultManager];
@@ -1832,24 +1833,26 @@ EPIT1Result registerEPIT1(
 
     TIMER_END(epit1_resamp, "EPIT1: changeVolumesResolutionAndSize");
 
-    // Save interpolated volume before alignment
-    std::vector<float> interpResult(t1Vol);
-    memcpy(interpResult.data(), [epiInT1 contents], t1Vol * sizeof(float));
-
     // Center-of-mass alignment
+    // OpenCL convention: params = input_center - ref_center
+    // This shifts input toward the reference center
     TIMER_START(epit1_com);
     float cx1, cy1, cz1, cx2, cy2, cz2;
     centerOfMass((float*)[t1Buf contents], t1Dims.W, t1Dims.H, t1Dims.D, cx1, cy1, cz1);
     centerOfMass((float*)[epiInT1 contents], t1Dims.W, t1Dims.H, t1Dims.D, cx2, cy2, cz2);
 
     float initParams[12] = {0};
-    initParams[0] = cx1 - cx2;
-    initParams[1] = cy1 - cy2;
-    initParams[2] = cz1 - cz2;
+    initParams[0] = cx2 - cx1;
+    initParams[1] = cy2 - cy1;
+    initParams[2] = cz2 - cz1;
 
     // Apply initial translation
     interpolateLinear(epiInT1, epiInT1, initParams, t1Dims.W, t1Dims.H, t1Dims.D);
     TIMER_END(epit1_com, "EPIT1: center-of-mass + initial align");
+
+    // Save interpolated volume after center-of-mass alignment (matches OpenCL)
+    std::vector<float> interpResult(t1Vol);
+    memcpy(interpResult.data(), [epiInT1 contents], t1Vol * sizeof(float));
 
     // Multi-scale linear registration (rigid body = 6 DOF subset of 12-param affine)
     float regParams[12] = {0};
@@ -1911,23 +1914,25 @@ T1MNIResult registerT1MNI(
 
     TIMER_END(t1mni_resamp, "T1MNI: changeVolumesResolutionAndSize");
 
-    // Save interpolated volume
-    std::vector<float> interpResult(mniVol);
-    memcpy(interpResult.data(), [t1InMNI contents], mniVol * sizeof(float));
-
     // Center-of-mass alignment
+    // OpenCL convention: params = input_center - ref_center
+    // This shifts input toward the reference center
     TIMER_START(t1mni_com);
     float cx1, cy1, cz1, cx2, cy2, cz2;
     centerOfMass((float*)[mniBuf contents], mniDims.W, mniDims.H, mniDims.D, cx1, cy1, cz1);
     centerOfMass((float*)[t1InMNI contents], mniDims.W, mniDims.H, mniDims.D, cx2, cy2, cz2);
 
     float initParams[12] = {0};
-    initParams[0] = cx1 - cx2;
-    initParams[1] = cy1 - cy2;
-    initParams[2] = cz1 - cz2;
+    initParams[0] = cx2 - cx1;
+    initParams[1] = cy2 - cy1;
+    initParams[2] = cz2 - cz1;
 
     interpolateLinear(t1InMNI, t1InMNI, initParams, mniDims.W, mniDims.H, mniDims.D);
     TIMER_END(t1mni_com, "T1MNI: center-of-mass + initial align");
+
+    // Save interpolated volume after center-of-mass alignment (matches OpenCL)
+    std::vector<float> interpResult(mniVol);
+    memcpy(interpResult.data(), [t1InMNI contents], mniVol * sizeof(float));
 
     // Linear registration
     float regParams[12] = {0};
