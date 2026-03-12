@@ -183,7 +183,17 @@ See `register/README.md` for benchmark results.
 **Results**: 1.4–2× speedup over unoptimized Metal (3–5× faster than OpenCL-via-Metal).
 All NCC values unchanged. See `register/README.md` for updated benchmarks.
 
+**FFT convolution evaluation (USE_FFT=1)**:
+- MPSGraph FFT path implemented as compile-time option (`USE_FFT=1 bash build.sh`)
+- Produces numerically equivalent results to spatial path
+- **Spatial texture3D wins at all tested sizes** — even at 58M voxels (0.5mm MNI), spatial is 11.6× faster
+- FFT bottleneck: CPU-side padding and readback every convolution call (600ms pad + 4s exec + 1-3s readback vs 170ms spatial)
+- Would need GPU-side padding and zero-copy to compete; 7×7×7 kernel is inherently spatial-friendly
+
+**Large volume benchmark** (t1_head 0.8mm → MNI 0.5mm, 58M voxels):
+- Spatial: 12.9s, NCC 0.869 — registration works without brain masks (mask only used for skull-stripped output)
+- FFT: 150s, NCC 0.869
+
 **Remaining opportunities**:
-- MPSGraph convolution3D evaluation (macOS 13.2+)
 - SIMD shuffle / threadgroup memory for separable smoothing
 - Memory optimization (1240 MB for 1mm — 24 filter response buffers allocated upfront)

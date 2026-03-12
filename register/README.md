@@ -30,25 +30,7 @@ affine registration (10 iterations), then nonlinear morphon-based registration
 (5 iterations per scale). The coarsest scale depends on the template voxel size:
 scale 4 for 2 mm MNI (scales 4/2/1), scale 8 for 1 mm MNI (scales 8/4/2/1).
 
-## Benchmark (Apple M4 Pro, macOS 15.3, OpenCL via Metal)
-
-| Task | Wall time | Peak RSS | NCC (aligned vs reference) |
-|------|-----------|----------|---------------------------|
-| EPI -> T1 | 1.0 s | 347 MB | 0.900 |
-| T1 -> MNI 2 mm | 0.8 s | 250 MB | 0.934 (linear 0.931) |
-| T1 -> MNI 1 mm | 1.9 s | 822 MB | 0.927 (linear 0.923) |
-
-NCC = normalized cross-correlation between the aligned output and the target
-volume. For T1 -> MNI, both linear-only and linear+nonlinear NCC are shown.
-
-## Benchmark (Apple M4 Pro, macOS 15.3, native Metal, optimized)
-
-| Task | Wall time | Peak RSS | NCC (aligned vs reference) | NCC (vs OpenCL ref) |
-|------|-----------|----------|---------------------------|---------------------|
-| EPI -> T1 | 0.3 s | 443 MB | 0.894 | 0.962 |
-| T1 -> MNI 2 mm | 0.2 s | 290 MB | 0.936 (linear 0.931) | 0.984 (linear 0.980) |
-| T1 -> MNI 1 mm | 1.1 s | 1240 MB | 0.925 (linear 0.920) | 0.985 (linear 0.983) |
-
+Per
 NCC vs OpenCL ref = normalized cross-correlation between the Metal and OpenCL
 outputs for the same registration task. Wall times are roughly 3–5× faster than
 OpenCL-via-Metal due to native Metal compute shaders and the following
