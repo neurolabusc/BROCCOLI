@@ -80,38 +80,34 @@ The `examples/` folder includes skull-stripped brain images for testing:
 - `t1_brain.nii.gz` — Structural (T1) volume (181x217x181, 1mm)
 - `MNI152_T1_1mm_brain.nii.gz` — MNI template at 1mm resolution (182x218x182)
 
-**EPI to T1 registration** (affine, ~0.2s):
+Pre-computed reference outputs are in `examples/metal/` and `examples/opencl/`.
+
+**Reproduce all example outputs** (saved to `examples/out/`):
 
 ```bash
+mkdir -p examples/out
+
+# EPI to T1 registration (affine, ~0.3s)
 ./broccolini \
   -in examples/EPI_brain.nii.gz \
   -ref examples/t1_brain.nii.gz \
-  -out /tmp/epi_to_t1.nii.gz \
-  -dof 12 -lineariter 20 -verbose
-```
+  -out examples/out/epi_t1_aligned.nii.gz \
+  -dof 12 -lineariter 20 -coarsestscale 8 -zcut 30
 
-**T1 to MNI spatial normalization** (affine, ~0.5s):
-
-```bash
+# T1 to MNI with nonlinear registration (~1s)
 ./broccolini \
   -in examples/t1_brain.nii.gz \
   -ref examples/MNI152_T1_1mm_brain.nii.gz \
-  -out ./tmp/t1_to_mni.nii.gz
+  -out examples/out/t1_mni_1mm_aligned_nonlinear.nii.gz \
+  -lineariter 10 -nonlineariter 5 -coarsestscale 8 -zcut 30
 ```
 
-**T1 to MNI with nonlinear registration** (affine + warp, ~3s):
+Compare your outputs against the reference for your backend (Metal on macOS, OpenCL on Linux):
 
 ```bash
-./broccolini \
-  -in examples/t1_brain.nii.gz \
-  -ref examples/MNI152_T1_1mm_brain.nii.gz \
-  -out ./tmp/t1_to_mni_nonlinear.nii.gz \
-  -nonlineariter 5 \
-  -omat ./tmp/affine.txt \
-  -ofield ./tmp/disp
+# Should match examples/metal/ (Metal) or examples/opencl/ (OpenCL)
+ls examples/out/
 ```
-
-This saves the aligned volume, the 4x4 affine matrix, and displacement field volumes (`disp_x.nii.gz`, `disp_y.nii.gz`, `disp_z.nii.gz`).
 
 ## Filter files
 
