@@ -33,6 +33,15 @@ code/
     build.sh                # Build script for macOS (Apple Silicon)
   Bash_Wrapper/             # CLI tools (not our focus)
   Matlab_Wrapper/           # MATLAB interface (not our focus)
+metal-registration/         # Native Metal backend (Stage 2)
+  src/
+    shaders/registration.metal  # Metal compute shaders
+    metal_registration.mm       # Host code (Objective-C++)
+    metal_registration.h        # Public API header
+  python/
+    metal_registration_module.mm  # pybind11 bindings
+    validate.py                   # Validation script
+  build.sh                      # Build script
 filters/                    # Pre-computed quadrature filters (.bin and .mat)
 register/                   # Test NIfTI images for validation
   EPI_brain.nii.gz          # Functional (EPI) test image
@@ -78,7 +87,8 @@ compiled/                   # Pre-compiled binaries (various platforms)
 
 - **Xcode**: provides g++, OpenCL framework headers
 - **OpenCL headers**: `$(xcrun --show-sdk-path)/System/Library/Frameworks/OpenCL.framework/Headers/`
-- **SWIG**: needed for Python bindings (`brew install swig`)
+- **SWIG**: needed for OpenCL Python bindings (`brew install swig`)
+- **pybind11**: needed for Metal Python bindings (`pip install pybind11`)
 - **Python 3**: with numpy, nibabel, scipy, matplotlib
 - **Eigen**: bundled in `code/BROCCOLI_LIB/Eigen/`
 - **clBLAS**: bundled in `code/BROCCOLI_LIB/clBLASMac/`
@@ -136,17 +146,29 @@ See `register/README.md` for benchmark results and detailed documentation.
 - Nonlinear registration converges for ~5-7 iterations per scale; slow drift beyond that
 - Must delete `compiled/Kernels/*.bin` after kernel source changes (binary cache)
 
-### Stage 2: Extract Registration & Metal Backend
+### Stage 2: Extract Registration & Metal Backend (COMPLETE)
 **Objective**: Extract registration functions; create a Metal compute backend.
 
-1. Identify minimal C++ subset needed for registration (separate from full BROCCOLI_LIB)
-2. Create standalone registration library with clean API
-3. Port OpenCL kernels to Metal Shading Language:
-   - `kernelRegistration.cpp` -> Metal compute shaders
-   - `kernelConvolution.cpp` (subset needed for registration filters)
-4. Create Metal host code (device, command queue, buffer management)
-5. Build Python bindings for Metal backend
-6. Validate: compare Metal outputs to OpenCL reference (registration params, aligned volumes)
+**Status**: All tasks complete. Metal backend passes all validation tests (NCC >= 0.85
+for all three registration tasks, NCC >= 0.96 vs OpenCL reference outputs).
+See `register/README.md` for benchmark results.
+
+**Build**: `cd metal-registration && bash build.sh`
+
+**Validate**: `cd metal-registration/python && python3 validate.py`
+
+**Implementation** (in `metal-registration/`):
+- `src/shaders/registration.metal` — Metal compute shaders (convolution, phase, tensor, interpolation)
+- `src/metal_registration.mm` — Host code (device, command queue, buffer management, registration pipeline)
+- `src/metal_registration.h` — Public API header
+- `python/metal_registration_module.mm` — pybind11 Python bindings
+- `python/validate.py` — Validation against OpenCL reference outputs
+
+**Key differences from OpenCL**:
+- Texture sampler uses `clamp_to_zero` (not `clamp_to_edge`) to avoid edge replication artifacts
+- `MTLMathModeSafe` for IEEE 754 compliance (preserves NaN guards)
+- Memory barriers between separable convolution passes
+- `@autoreleasepool` blocks for prompt Metal buffer deallocation
 
 ### Stage 3: Optimization
 **Objective**: Optimize Metal backend for performance parity or better than OpenCL.

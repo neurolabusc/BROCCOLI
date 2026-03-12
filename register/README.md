@@ -41,6 +41,18 @@ scale 4 for 2 mm MNI (scales 4/2/1), scale 8 for 1 mm MNI (scales 8/4/2/1).
 NCC = normalized cross-correlation between the aligned output and the target
 volume. For T1 -> MNI, both linear-only and linear+nonlinear NCC are shown.
 
+## Benchmark (Apple M4 Pro, macOS 15.3, native Metal)
+
+| Task | Wall time | Peak RSS | NCC (aligned vs reference) | NCC (vs OpenCL ref) |
+|------|-----------|----------|---------------------------|---------------------|
+| EPI -> T1 | 0.5 s | 443 MB | 0.894 | 0.962 |
+| T1 -> MNI 2 mm | 0.4 s | 290 MB | 0.936 (linear 0.931) | 0.984 (linear 0.980) |
+| T1 -> MNI 1 mm | 1.5 s | 1237 MB | 0.925 (linear 0.920) | 0.985 (linear 0.983) |
+
+NCC vs OpenCL ref = normalized cross-correlation between the Metal and OpenCL
+outputs for the same registration task. Wall times are roughly 2× faster than
+OpenCL-via-Metal due to avoiding the runtime kernel translation layer.
+
 ## Reference outputs
 
 Saved in `reference_outputs/`:
@@ -75,8 +87,9 @@ adjustments were required for correct nonlinear registration:
 
 These changes are in `code/Kernels/kernelRegistration.cpp`. The nonlinear
 registration converges for approximately 5-7 iterations per scale before a slow
-drift from accumulated precision errors begins to degrade alignment. This will
-be addressed in Stage 2 with a native Metal backend.
+drift from accumulated precision errors begins to degrade alignment. The native
+Metal backend in `metal-registration/` avoids this issue by using IEEE 754-safe
+math mode and explicit NaN guards.
 
 ## Reproducing
 
