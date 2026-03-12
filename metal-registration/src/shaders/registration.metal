@@ -170,6 +170,60 @@ kernel void nonseparableConv3D_ThreeFilters(
 }
 
 // ============================================================
+//  Full 3D Nonseparable Convolution (texture3D, no z-loop)
+//  Processes entire 7x7x7 filter in a single dispatch.
+//  Uses hardware texture cache for efficient 3D neighborhood reads.
+// ============================================================
+
+kernel void nonseparableConv3D_Full(
+    device float2* response1 [[buffer(0)]],
+    device float2* response2 [[buffer(1)]],
+    device float2* response3 [[buffer(2)]],
+    texture3d<float, access::sample> volume [[texture(0)]],
+    constant float* filter1Real [[buffer(3)]],   // 343 floats (7x7x7)
+    constant float* filter1Imag [[buffer(4)]],
+    constant float* filter2Real [[buffer(5)]],
+    constant float* filter2Imag [[buffer(6)]],
+    constant float* filter3Real [[buffer(7)]],
+    constant float* filter3Imag [[buffer(8)]],
+    constant Dims& dims [[buffer(9)]],
+    uint3 gid [[thread_position_in_grid]])
+{
+    int x = gid.x, y = gid.y, z = gid.z;
+    if (x >= dims.W || y >= dims.H || z >= dims.D) return;
+
+    constexpr sampler s(coord::pixel, address::clamp_to_zero, filter::nearest);
+
+    float s1r = 0, s1i = 0, s2r = 0, s2i = 0, s3r = 0, s3i = 0;
+
+    // Full 7x7x7 convolution — matches the z-slice loop + 2D convolution pattern
+    // Filter index: fi = fx + fy*7 + fz*49
+    // Source offset: (3-fx, 3-fy, 3-fz) relative to output voxel
+    for (int fz = 0; fz < 7; fz++) {
+        float srcZ = float(z + 3 - fz) + 0.5f;
+        for (int fy = 0; fy < 7; fy++) {
+            float srcY = float(y + 3 - fy) + 0.5f;
+            for (int fx = 0; fx < 7; fx++) {
+                float srcX = float(x + 3 - fx) + 0.5f;
+                float p = volume.sample(s, float3(srcX, srcY, srcZ)).x;
+                int fi = fx + fy * 7 + fz * 49;
+                s1r += filter1Real[fi] * p;
+                s1i += filter1Imag[fi] * p;
+                s2r += filter2Real[fi] * p;
+                s2i += filter2Imag[fi] * p;
+                s3r += filter3Real[fi] * p;
+                s3i += filter3Imag[fi] * p;
+            }
+        }
+    }
+
+    int outIdx = idx3(x, y, z, dims.W, dims.H);
+    response1[outIdx] = float2(s1r, s1i);
+    response2[outIdx] = float2(s2r, s2i);
+    response3[outIdx] = float2(s3r, s3i);
+}
+
+// ============================================================
 //  Separable convolution — rows (along y), columns (along x), rods (along z)
 //  Filter size = 9 (hardcoded, matching BROCCOLI's smoothing)
 // ============================================================

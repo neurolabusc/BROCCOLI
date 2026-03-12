@@ -10,8 +10,13 @@
 #include <string>
 #include <cassert>
 #include <algorithm>
+#include <CoreFoundation/CoreFoundation.h>
 
 #include "metal_registration.h"
+
+// Timing helper macro
+#define TIMER_START(name) CFAbsoluteTime _t_##name = CFAbsoluteTimeGetCurrent()
+#define TIMER_END(name, label) printf("[TIMING] %-50s %8.3f ms\n", label, (CFAbsoluteTimeGetCurrent() - _t_##name) * 1000.0)
 
 // ============================================================
 //  Internal helpers
@@ -196,16 +201,66 @@ void dispatch2D(id<MTLComputeCommandEncoder> enc, id<MTLComputePipelineState> ps
 //  GPU operations
 // ============================================================
 
+// ============================================================
+//  Encoder-level helpers (encode into existing command encoder)
+//  These allow batching multiple operations into a single CB.
+// ============================================================
+
+void encodeFill(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> buf, float value, int count) {
+    auto& c = ctx();
+    auto ps = c.getPipeline("fillFloat");
+    id<MTLBuffer> valBuf = c.newBuffer(&value, sizeof(float));
+    [enc setComputePipelineState:ps];
+    [enc setBuffer:buf offset:0 atIndex:0];
+    [enc setBuffer:valBuf offset:0 atIndex:1];
+    dispatch1D(enc, ps, count);
+}
+
+void encodeFillFloat2(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> buf, int count) {
+    auto& c = ctx();
+    auto ps = c.getPipeline("fillFloat2");
+    float zero[2] = {0, 0};
+    id<MTLBuffer> valBuf = c.newBuffer(zero, sizeof(float) * 2);
+    [enc setComputePipelineState:ps];
+    [enc setBuffer:buf offset:0 atIndex:0];
+    [enc setBuffer:valBuf offset:0 atIndex:1];
+    dispatch1D(enc, ps, count);
+}
+
+void encodeAdd(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> A, id<MTLBuffer> B, int count) {
+    auto& c = ctx();
+    auto ps = c.getPipeline("addVolumes");
+    [enc setComputePipelineState:ps];
+    [enc setBuffer:A offset:0 atIndex:0];
+    [enc setBuffer:B offset:0 atIndex:1];
+    dispatch1D(enc, ps, count);
+}
+
+void encodeMultiply(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> vol, float factor, int count) {
+    auto& c = ctx();
+    auto ps = c.getPipeline("multiplyVolume");
+    id<MTLBuffer> fBuf = c.newBuffer(&factor, sizeof(float));
+    [enc setComputePipelineState:ps];
+    [enc setBuffer:vol offset:0 atIndex:0];
+    [enc setBuffer:fBuf offset:0 atIndex:1];
+    dispatch1D(enc, ps, count);
+}
+
+void encodeMultiplyVolumes(id<MTLComputeCommandEncoder> enc, id<MTLBuffer> A, id<MTLBuffer> B, int count) {
+    auto& c = ctx();
+    auto ps = c.getPipeline("multiplyVolumes");
+    [enc setComputePipelineState:ps];
+    [enc setBuffer:A offset:0 atIndex:0];
+    [enc setBuffer:B offset:0 atIndex:1];
+    dispatch1D(enc, ps, count);
+}
+
+// Standalone versions (own command buffer) — used where batching isn't beneficial
 void fillBuffer(id<MTLBuffer> buf, float value, int count) {
     auto& c = ctx();
     id<MTLCommandBuffer> cb = [c.queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-    auto ps = c.getPipeline("fillFloat");
-    [enc setComputePipelineState:ps];
-    [enc setBuffer:buf offset:0 atIndex:0];
-    id<MTLBuffer> valBuf = c.newBuffer(&value, sizeof(float));
-    [enc setBuffer:valBuf offset:0 atIndex:1];
-    dispatch1D(enc, ps, count);
+    encodeFill(enc, buf, value, count);
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
@@ -215,13 +270,7 @@ void fillFloat2Buffer(id<MTLBuffer> buf, int count) {
     auto& c = ctx();
     id<MTLCommandBuffer> cb = [c.queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-    auto ps = c.getPipeline("fillFloat2");
-    [enc setComputePipelineState:ps];
-    [enc setBuffer:buf offset:0 atIndex:0];
-    float zero[2] = {0, 0};
-    id<MTLBuffer> valBuf = c.newBuffer(zero, sizeof(float) * 2);
-    [enc setBuffer:valBuf offset:0 atIndex:1];
-    dispatch1D(enc, ps, count);
+    encodeFillFloat2(enc, buf, count);
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
@@ -231,11 +280,7 @@ void addVolumes(id<MTLBuffer> A, id<MTLBuffer> B, int count) {
     auto& c = ctx();
     id<MTLCommandBuffer> cb = [c.queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-    auto ps = c.getPipeline("addVolumes");
-    [enc setComputePipelineState:ps];
-    [enc setBuffer:A offset:0 atIndex:0];
-    [enc setBuffer:B offset:0 atIndex:1];
-    dispatch1D(enc, ps, count);
+    encodeAdd(enc, A, B, count);
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
@@ -245,12 +290,7 @@ void multiplyVolume(id<MTLBuffer> vol, float factor, int count) {
     auto& c = ctx();
     id<MTLCommandBuffer> cb = [c.queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-    auto ps = c.getPipeline("multiplyVolume");
-    [enc setComputePipelineState:ps];
-    [enc setBuffer:vol offset:0 atIndex:0];
-    id<MTLBuffer> fBuf = c.newBuffer(&factor, sizeof(float));
-    [enc setBuffer:fBuf offset:0 atIndex:1];
-    dispatch1D(enc, ps, count);
+    encodeMultiply(enc, vol, factor, count);
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
@@ -260,11 +300,7 @@ void multiplyVolumes(id<MTLBuffer> A, id<MTLBuffer> B, int count) {
     auto& c = ctx();
     id<MTLCommandBuffer> cb = [c.queue commandBuffer];
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-    auto ps = c.getPipeline("multiplyVolumes");
-    [enc setComputePipelineState:ps];
-    [enc setBuffer:A offset:0 atIndex:0];
-    [enc setBuffer:B offset:0 atIndex:1];
-    dispatch1D(enc, ps, count);
+    encodeMultiplyVolumes(enc, A, B, count);
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
@@ -317,76 +353,46 @@ void nonseparableConvolution3D(
     const float* filterReal3, const float* filterImag3,
     int W, int H, int D)
 {
+    TIMER_START(conv3d);
     auto& c = ctx();
-    int vol = W * H * D;
 
-    // Zero-init response buffers
-    fillFloat2Buffer(resp1, vol);
-    fillFloat2Buffer(resp2, vol);
-    fillFloat2Buffer(resp3, vol);
+    // Create texture3D from volume buffer (hardware-cached reads)
+    id<MTLTexture> tex = c.newTexture3D(W, H, D);
+    c.copyBufferToTexture(volume, tex, W, H, D);
 
-    auto ps = c.getPipeline("nonseparableConv3D_ThreeFilters");
+    // Upload full 7x7x7 filter coefficients (343 floats each)
+    id<MTLBuffer> f1r = c.newBuffer(filterReal1, 343 * sizeof(float));
+    id<MTLBuffer> f1i = c.newBuffer(filterImag1, 343 * sizeof(float));
+    id<MTLBuffer> f2r = c.newBuffer(filterReal2, 343 * sizeof(float));
+    id<MTLBuffer> f2i = c.newBuffer(filterImag2, 343 * sizeof(float));
+    id<MTLBuffer> f3r = c.newBuffer(filterReal3, 343 * sizeof(float));
+    id<MTLBuffer> f3i = c.newBuffer(filterImag3, 343 * sizeof(float));
+
     Dims dims = {W, H, D};
     id<MTLBuffer> dimBuf = c.newBuffer(&dims, sizeof(Dims));
 
-    // For each z-slice of the 7x7x7 filter (reverse z iteration to match OpenCL)
-    int zOff = -3;
-    for (int zz = 6; zz >= 0; zz--) {
-      @autoreleasepool {
-        // Extract 7x7 slice from each 7x7x7 filter
-        int zSlice = zz;
-        float slice1R[49], slice1I[49], slice2R[49], slice2I[49], slice3R[49], slice3I[49];
-        for (int fy = 0; fy < 7; fy++) {
-            for (int fx = 0; fx < 7; fx++) {
-                int fi2d = fx + fy * 7;
-                int fi3d = fx + fy * 7 + zSlice * 49;
-                slice1R[fi2d] = filterReal1[fi3d];
-                slice1I[fi2d] = filterImag1[fi3d];
-                slice2R[fi2d] = filterReal2[fi3d];
-                slice2I[fi2d] = filterImag2[fi3d];
-                slice3R[fi2d] = filterReal3[fi3d];
-                slice3I[fi2d] = filterImag3[fi3d];
-            }
-        }
+    // Single dispatch — full 7x7x7 convolution per thread, texture-cached
+    auto ps = c.getPipeline("nonseparableConv3D_Full");
+    id<MTLCommandBuffer> cb = [c.queue commandBuffer];
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    [enc setComputePipelineState:ps];
+    [enc setBuffer:resp1 offset:0 atIndex:0];
+    [enc setBuffer:resp2 offset:0 atIndex:1];
+    [enc setBuffer:resp3 offset:0 atIndex:2];
+    [enc setTexture:tex atIndex:0];
+    [enc setBuffer:f1r offset:0 atIndex:3];
+    [enc setBuffer:f1i offset:0 atIndex:4];
+    [enc setBuffer:f2r offset:0 atIndex:5];
+    [enc setBuffer:f2i offset:0 atIndex:6];
+    [enc setBuffer:f3r offset:0 atIndex:7];
+    [enc setBuffer:f3i offset:0 atIndex:8];
+    [enc setBuffer:dimBuf offset:0 atIndex:9];
+    dispatch3D(enc, ps, W, H, D);
 
-        id<MTLBuffer> f1r = c.newBuffer(slice1R, 49 * sizeof(float));
-        id<MTLBuffer> f1i = c.newBuffer(slice1I, 49 * sizeof(float));
-        id<MTLBuffer> f2r = c.newBuffer(slice2R, 49 * sizeof(float));
-        id<MTLBuffer> f2i = c.newBuffer(slice2I, 49 * sizeof(float));
-        id<MTLBuffer> f3r = c.newBuffer(slice3R, 49 * sizeof(float));
-        id<MTLBuffer> f3i = c.newBuffer(slice3I, 49 * sizeof(float));
-        id<MTLBuffer> zBuf = c.newBuffer(&zOff, sizeof(int));
-
-        id<MTLCommandBuffer> cb = [c.queue commandBuffer];
-        id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-        [enc setComputePipelineState:ps];
-        [enc setBuffer:resp1 offset:0 atIndex:0];
-        [enc setBuffer:resp2 offset:0 atIndex:1];
-        [enc setBuffer:resp3 offset:0 atIndex:2];
-        [enc setBuffer:volume offset:0 atIndex:3];
-        [enc setBuffer:f1r offset:0 atIndex:4];
-        [enc setBuffer:f1i offset:0 atIndex:5];
-        [enc setBuffer:f2r offset:0 atIndex:6];
-        [enc setBuffer:f2i offset:0 atIndex:7];
-        [enc setBuffer:f3r offset:0 atIndex:8];
-        [enc setBuffer:f3i offset:0 atIndex:9];
-        [enc setBuffer:zBuf offset:0 atIndex:10];
-        [enc setBuffer:dimBuf offset:0 atIndex:11];
-
-        // Dispatch with threadgroup size including halos
-        int validW = 32 - 2 * 3; // 26
-        int validH = 32 - 2 * 3; // 26
-        int groupsX = (W + validW - 1) / validW;
-        int groupsY = (H + validH - 1) / validH;
-        [enc dispatchThreadgroups:MTLSizeMake(groupsX, groupsY, D)
-            threadsPerThreadgroup:MTLSizeMake(32, 32, 1)];
-
-        [enc endEncoding];
-        [cb commit];
-        [cb waitUntilCompleted];
-        zOff++;
-      }
-    }
+    [enc endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+    TIMER_END(conv3d, "  conv3D total");
 }
 
 // ============================================================
@@ -395,6 +401,7 @@ void nonseparableConvolution3D(
 
 void performSmoothing(id<MTLBuffer> output, id<MTLBuffer> input, int W, int H, int D,
                       const float* smoothingFilter) {
+    TIMER_START(smooth);
     auto& c = ctx();
     Dims dims = {W, H, D};
     id<MTLBuffer> dimBuf = c.newBuffer(&dims, sizeof(Dims));
@@ -441,6 +448,7 @@ void performSmoothing(id<MTLBuffer> output, id<MTLBuffer> input, int W, int H, i
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
+    TIMER_END(smooth, "  smoothing 3-pass");
 }
 
 // In-place smoothing
@@ -455,6 +463,80 @@ void performSmoothingInPlace(id<MTLBuffer> volume, int W, int H, int D,
     id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
     [blit copyFromBuffer:output sourceOffset:0 toBuffer:volume destinationOffset:0 size:bytes];
     [blit endEncoding];
+    [cb commit];
+    [cb waitUntilCompleted];
+}
+
+// Encode smoothing + blit-copy-back into an existing command buffer.
+// Uses pre-allocated temp buffers to avoid per-call allocation.
+void encodeSmoothingInPlace(id<MTLCommandBuffer> cb,
+                            id<MTLBuffer> volume, int W, int H, int D,
+                            id<MTLBuffer> filterBuf, id<MTLBuffer> dimBuf,
+                            id<MTLBuffer> temp1, id<MTLBuffer> temp2,
+                            id<MTLBuffer> output) {
+    auto& c = ctx();
+
+    // Compute encoder: 3-pass separable convolution
+    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+
+    auto ps1 = c.getPipeline("separableConvRows");
+    [enc setComputePipelineState:ps1];
+    [enc setBuffer:temp1 offset:0 atIndex:0];
+    [enc setBuffer:volume offset:0 atIndex:1];
+    [enc setBuffer:filterBuf offset:0 atIndex:2];
+    [enc setBuffer:dimBuf offset:0 atIndex:3];
+    dispatch3D(enc, ps1, W, H, D);
+
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    auto ps2 = c.getPipeline("separableConvColumns");
+    [enc setComputePipelineState:ps2];
+    [enc setBuffer:temp2 offset:0 atIndex:0];
+    [enc setBuffer:temp1 offset:0 atIndex:1];
+    [enc setBuffer:filterBuf offset:0 atIndex:2];
+    [enc setBuffer:dimBuf offset:0 atIndex:3];
+    dispatch3D(enc, ps2, W, H, D);
+
+    [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+    auto ps3 = c.getPipeline("separableConvRods");
+    [enc setComputePipelineState:ps3];
+    [enc setBuffer:output offset:0 atIndex:0];
+    [enc setBuffer:temp2 offset:0 atIndex:1];
+    [enc setBuffer:filterBuf offset:0 atIndex:2];
+    [enc setBuffer:dimBuf offset:0 atIndex:3];
+    dispatch3D(enc, ps3, W, H, D);
+
+    [enc endEncoding];
+
+    // Blit encoder: copy output back to volume
+    id<MTLBlitCommandEncoder> blit = [cb blitCommandEncoder];
+    NSUInteger bytes = W * H * D * sizeof(float);
+    [blit copyFromBuffer:output sourceOffset:0 toBuffer:volume destinationOffset:0 size:bytes];
+    [blit endEncoding];
+}
+
+// Batch multiple in-place smoothings into a single command buffer.
+// Dramatically reduces CB creation overhead for the 6/9/3 smoothing batches.
+void batchSmoothInPlace(std::initializer_list<id<MTLBuffer>> volumes,
+                        int W, int H, int D, const float* smoothingFilter) {
+    auto& c = ctx();
+    int vol = W * H * D;
+
+    // Pre-allocate shared temp buffers (reused across all smoothings in this batch)
+    id<MTLBuffer> temp1 = c.newBuffer(vol * sizeof(float));
+    id<MTLBuffer> temp2 = c.newBuffer(vol * sizeof(float));
+    id<MTLBuffer> output = c.newBuffer(vol * sizeof(float));
+
+    Dims dims = {W, H, D};
+    id<MTLBuffer> dimBuf = c.newBuffer(&dims, sizeof(Dims));
+    id<MTLBuffer> filterBuf = c.newBuffer(smoothingFilter, 9 * sizeof(float));
+
+    id<MTLCommandBuffer> cb = [c.queue commandBuffer];
+    for (id<MTLBuffer> vol_buf : volumes) {
+        encodeSmoothingInPlace(cb, vol_buf, W, H, D,
+                               filterBuf, dimBuf, temp1, temp2, output);
+    }
     [cb commit];
     [cb waitUntilCompleted];
 }
@@ -894,23 +976,28 @@ void alignTwoVolumesLinear(
     memset([h1D contents], 0, 12 * D * sizeof(float));
 
     // Filter reference volume once
+    TIMER_START(lin_ref_conv);
     nonseparableConvolution3D(q11, q12, q13, referenceVolume,
         filters.linearReal[0].data(), filters.linearImag[0].data(),
         filters.linearReal[1].data(), filters.linearImag[1].data(),
         filters.linearReal[2].data(), filters.linearImag[2].data(),
         W, H, D);
+    TIMER_END(lin_ref_conv, "  linear: ref convolution");
 
     Dims dims = {W, H, D};
     id<MTLBuffer> dimBuf = c.newBuffer(&dims, sizeof(Dims));
 
     for (int iter = 0; iter < numIterations; iter++) {
       @autoreleasepool {
+        TIMER_START(lin_iter);
         // Filter aligned volume
+        TIMER_START(lin_align_conv);
         nonseparableConvolution3D(q21, q22, q23, alignedVolume,
             filters.linearReal[0].data(), filters.linearImag[0].data(),
             filters.linearReal[1].data(), filters.linearImag[1].data(),
             filters.linearReal[2].data(), filters.linearImag[2].data(),
             W, H, D);
+        TIMER_END(lin_align_conv, "  linear: aligned convolution");
 
         // Process each direction (X, Y, Z)
         struct { int dirOff; int hOff; id<MTLBuffer> q1; id<MTLBuffer> q2; const char* gradKernel; }
@@ -920,148 +1007,133 @@ void alignTwoVolumesLinear(
             {20, 2, q13, q23, "calculatePhaseGradientsZ"},
         };
 
-        // Zero intermediate buffers before each iteration
-        fillBuffer(phaseDiff, 0.0f, vol);
-        fillBuffer(certainties, 0.0f, vol);
-        fillBuffer(phaseGrad, 0.0f, vol);
+        // Zero intermediate buffers + 3-direction phase/grad/Amat in single CB
         memset([h2D contents], 0, 12 * HD * sizeof(float));
         memset([A2D contents], 0, 30 * HD * sizeof(float));
 
-        for (int d = 0; d < 3; d++) {
-            // Phase differences and certainties
-            {
-                auto ps = c.getPipeline("calculatePhaseDifferencesAndCertainties");
-                id<MTLCommandBuffer> cb = [c.queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-                [enc setComputePipelineState:ps];
+        TIMER_START(lin_phase_amat);
+        {
+            struct AParams {
+                int W, H, D, filterSize, dirOff, hOff;
+            };
+
+            id<MTLCommandBuffer> cb = [c.queue commandBuffer];
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+
+            // Zero phase/certainty/grad buffers
+            encodeFill(enc, phaseDiff, 0.0f, vol);
+            encodeFill(enc, certainties, 0.0f, vol);
+            encodeFill(enc, phaseGrad, 0.0f, vol);
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+            auto psPhaseDiff = c.getPipeline("calculatePhaseDifferencesAndCertainties");
+            auto psAmat2D = c.getPipeline("calculateAMatrixAndHVector2D");
+
+            for (int d = 0; d < 3; d++) {
+                // Phase differences + certainties
+                [enc setComputePipelineState:psPhaseDiff];
                 [enc setBuffer:phaseDiff offset:0 atIndex:0];
                 [enc setBuffer:certainties offset:0 atIndex:1];
                 [enc setBuffer:dirs[d].q1 offset:0 atIndex:2];
                 [enc setBuffer:dirs[d].q2 offset:0 atIndex:3];
                 [enc setBuffer:dimBuf offset:0 atIndex:4];
-                dispatch3D(enc, ps, W, H, D);
-                [enc endEncoding];
-                [cb commit];
-                [cb waitUntilCompleted];
-            }
+                dispatch3D(enc, psPhaseDiff, W, H, D);
 
-            // Phase gradients
-            {
-                auto ps = c.getPipeline(dirs[d].gradKernel);
-                id<MTLCommandBuffer> cb = [c.queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-                [enc setComputePipelineState:ps];
+                // Phase gradients (reads q1/q2, writes phaseGrad — independent of phaseDiff)
+                auto psGrad = c.getPipeline(dirs[d].gradKernel);
+                [enc setComputePipelineState:psGrad];
                 [enc setBuffer:phaseGrad offset:0 atIndex:0];
                 [enc setBuffer:dirs[d].q1 offset:0 atIndex:1];
                 [enc setBuffer:dirs[d].q2 offset:0 atIndex:2];
                 [enc setBuffer:dimBuf offset:0 atIndex:3];
-                dispatch3D(enc, ps, W, H, D);
-                [enc endEncoding];
-                [cb commit];
-                [cb waitUntilCompleted];
-            }
+                dispatch3D(enc, psGrad, W, H, D);
 
-            // A-matrix and h-vector 2D values
-            {
-                struct AParams {
-                    int W, H, D, filterSize, dirOff, hOff;
-                };
+                // Barrier: Amat reads phaseDiff, phaseGrad, certainties
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+                // A-matrix and h-vector 2D values
                 AParams ap = {W, H, D, filterSize, dirs[d].dirOff, dirs[d].hOff};
                 id<MTLBuffer> apBuf = c.newBuffer(&ap, sizeof(AParams));
-
-                auto ps = c.getPipeline("calculateAMatrixAndHVector2D");
-                id<MTLCommandBuffer> cb = [c.queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-                [enc setComputePipelineState:ps];
+                [enc setComputePipelineState:psAmat2D];
                 [enc setBuffer:A2D offset:0 atIndex:0];
                 [enc setBuffer:h2D offset:0 atIndex:1];
                 [enc setBuffer:phaseDiff offset:0 atIndex:2];
                 [enc setBuffer:phaseGrad offset:0 atIndex:3];
                 [enc setBuffer:certainties offset:0 atIndex:4];
                 [enc setBuffer:apBuf offset:0 atIndex:5];
-                dispatch2D(enc, ps, H, D);
-                [enc endEncoding];
-                [cb commit];
-                [cb waitUntilCompleted];
-            }
-        }
+                dispatch2D(enc, psAmat2D, H, D);
 
-        // Reduce A-matrix: 2D -> 1D -> final
-        // Each step in its own command buffer to avoid ordering issues
+                // Barrier before next direction overwrites phaseDiff/phaseGrad/certainties
+                if (d < 2) [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            }
+
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
+        }
+        TIMER_END(lin_phase_amat, "  linear: phase/grad/Amat 3dirs");
+
+        // Reduce A-matrix: 2D -> 1D -> final (single CB with barriers)
+        TIMER_START(lin_reduce);
         {
             id<MTLBuffer> hBuf = c.newBuffer(&H, sizeof(int));
             id<MTLBuffer> dBuf = c.newBuffer(&D, sizeof(int));
             id<MTLBuffer> fsBuf = c.newBuffer(&filterSize, sizeof(int));
 
-            // A-matrix 1D
-            {
-                id<MTLCommandBuffer> cb = [c.queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-                auto ps = c.getPipeline("calculateAMatrix1D");
-                [enc setComputePipelineState:ps];
-                [enc setBuffer:A1D offset:0 atIndex:0];
-                [enc setBuffer:A2D offset:0 atIndex:1];
-                [enc setBuffer:hBuf offset:0 atIndex:2];
-                [enc setBuffer:dBuf offset:0 atIndex:3];
-                [enc setBuffer:fsBuf offset:0 atIndex:4];
-                dispatch2D(enc, ps, D, 30);
-                [enc endEncoding];
-                [cb commit];
-                [cb waitUntilCompleted];
-            }
+            id<MTLCommandBuffer> cb = [c.queue commandBuffer];
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
 
-            // Reset and compute A-matrix final
-            fillBuffer(Amat, 0.0f, 144);
-            {
-                id<MTLCommandBuffer> cb = [c.queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-                auto ps = c.getPipeline("calculateAMatrixFinal");
-                [enc setComputePipelineState:ps];
-                [enc setBuffer:Amat offset:0 atIndex:0];
-                [enc setBuffer:A1D offset:0 atIndex:1];
-                [enc setBuffer:dBuf offset:0 atIndex:2];
-                [enc setBuffer:fsBuf offset:0 atIndex:3];
-                dispatch1D(enc, ps, 30);
-                [enc endEncoding];
-                [cb commit];
-                [cb waitUntilCompleted];
-            }
+            // A-matrix 1D + h-vector 1D (independent, both read from 2D)
+            auto psA1D = c.getPipeline("calculateAMatrix1D");
+            [enc setComputePipelineState:psA1D];
+            [enc setBuffer:A1D offset:0 atIndex:0];
+            [enc setBuffer:A2D offset:0 atIndex:1];
+            [enc setBuffer:hBuf offset:0 atIndex:2];
+            [enc setBuffer:dBuf offset:0 atIndex:3];
+            [enc setBuffer:fsBuf offset:0 atIndex:4];
+            dispatch2D(enc, psA1D, D, 30);
 
-            // h-vector 1D
-            {
-                id<MTLCommandBuffer> cb = [c.queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-                auto ps = c.getPipeline("calculateHVector1D");
-                [enc setComputePipelineState:ps];
-                [enc setBuffer:h1D offset:0 atIndex:0];
-                [enc setBuffer:h2D offset:0 atIndex:1];
-                [enc setBuffer:hBuf offset:0 atIndex:2];
-                [enc setBuffer:dBuf offset:0 atIndex:3];
-                [enc setBuffer:fsBuf offset:0 atIndex:4];
-                dispatch2D(enc, ps, D, 12);
-                [enc endEncoding];
-                [cb commit];
-                [cb waitUntilCompleted];
-            }
+            auto psH1D = c.getPipeline("calculateHVector1D");
+            [enc setComputePipelineState:psH1D];
+            [enc setBuffer:h1D offset:0 atIndex:0];
+            [enc setBuffer:h2D offset:0 atIndex:1];
+            [enc setBuffer:hBuf offset:0 atIndex:2];
+            [enc setBuffer:dBuf offset:0 atIndex:3];
+            [enc setBuffer:fsBuf offset:0 atIndex:4];
+            dispatch2D(enc, psH1D, D, 12);
 
-            // h-vector final
-            {
-                id<MTLCommandBuffer> cb = [c.queue commandBuffer];
-                id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-                auto ps = c.getPipeline("calculateHVectorFinal");
-                [enc setComputePipelineState:ps];
-                [enc setBuffer:hvec offset:0 atIndex:0];
-                [enc setBuffer:h1D offset:0 atIndex:1];
-                [enc setBuffer:dBuf offset:0 atIndex:2];
-                [enc setBuffer:fsBuf offset:0 atIndex:3];
-                dispatch1D(enc, ps, 12);
-                [enc endEncoding];
-                [cb commit];
-                [cb waitUntilCompleted];
-            }
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+            // Zero Amat, then compute final reduction
+            encodeFill(enc, Amat, 0.0f, 144);
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+            auto psAFinal = c.getPipeline("calculateAMatrixFinal");
+            [enc setComputePipelineState:psAFinal];
+            [enc setBuffer:Amat offset:0 atIndex:0];
+            [enc setBuffer:A1D offset:0 atIndex:1];
+            [enc setBuffer:dBuf offset:0 atIndex:2];
+            [enc setBuffer:fsBuf offset:0 atIndex:3];
+            dispatch1D(enc, psAFinal, 30);
+
+            // h-vector final (reads h1D which is already done)
+            auto psHFinal = c.getPipeline("calculateHVectorFinal");
+            [enc setComputePipelineState:psHFinal];
+            [enc setBuffer:hvec offset:0 atIndex:0];
+            [enc setBuffer:h1D offset:0 atIndex:1];
+            [enc setBuffer:dBuf offset:0 atIndex:2];
+            [enc setBuffer:fsBuf offset:0 atIndex:3];
+            dispatch1D(enc, psHFinal, 12);
+
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
         }
 
+        TIMER_END(lin_reduce, "  linear: A-matrix reduction");
+
         // Read back A and h, solve on CPU
+        TIMER_START(lin_solve);
         float hA[144], hh[12];
         memcpy(hA, [Amat contents], 144 * sizeof(float));
 
@@ -1086,8 +1158,13 @@ void alignTwoVolumesLinear(
         for (int i = 0; i < 12; i++) deltaParams[i] = (float)paramsDbl[i];
         composeAffineParams(registrationParams, deltaParams);
 
+        TIMER_END(lin_solve, "  linear: solve+compose");
+
         // Apply affine transform from original volume (not already-transformed)
+        TIMER_START(lin_interp);
         interpolateLinear(alignedVolume, originalAligned, registrationParams, W, H, D);
+        TIMER_END(lin_interp, "  linear: interpolation");
+        TIMER_END(lin_iter, "  linear: iteration total");
       }
     }
 }
@@ -1119,8 +1196,10 @@ void alignTwoVolumesLinearSeveralScales(
     memcpy([originalAligned contents], [alignedVolume contents], vol * sizeof(float));
 
     // Start from coarsest scale, work to finest
+    TIMER_START(lin_all_scales);
     for (int scale = coarsestScale; scale >= 1; scale /= 2) {
       @autoreleasepool {
+        TIMER_START(lin_scale);
         int sW = (int)roundf((float)W / (float)scale);
         int sH = (int)roundf((float)H / (float)scale);
         int sD = (int)roundf((float)D / (float)scale);
@@ -1128,10 +1207,12 @@ void alignTwoVolumesLinearSeveralScales(
         if (sW < 8 || sH < 8 || sD < 8) continue;
 
         // Downscale both volumes from originals at each scale
+        TIMER_START(lin_downscale);
         id<MTLBuffer> scaledRef = (scale == 1) ? referenceVolume :
             changeVolumeSize(referenceVolume, W, H, D, sW, sH, sD);
         id<MTLBuffer> scaledAligned = (scale == 1) ? alignedVolume :
             changeVolumeSize(originalAligned, W, H, D, sW, sH, sD);
+        TIMER_END(lin_downscale, "  linear: downscale volumes");
 
         // For non-coarsest scales: pre-transform with accumulated params
         if (scale < coarsestScale) {
@@ -1152,6 +1233,10 @@ void alignTwoVolumesLinearSeveralScales(
                               sW, sH, sD, filterSize, iters,
                               tempParams, verbose);
 
+        char scaleLabel[80];
+        snprintf(scaleLabel, sizeof(scaleLabel), "LINEAR SCALE %d total", scale);
+        TIMER_END(lin_scale, scaleLabel);
+
         // Compose this scale's params with accumulated total
         if (scale != 1) {
             // NextScale variant: translations * 2 before matrix multiply
@@ -1165,8 +1250,12 @@ void alignTwoVolumesLinearSeveralScales(
       }
     }
 
+    TIMER_END(lin_all_scales, "LINEAR REGISTRATION all scales total");
+
     // Final transform of original volume with complete parameters (full resolution)
+    TIMER_START(lin_final_interp);
     interpolateLinear(alignedVolume, originalAligned, registrationParams, W, H, D);
+    TIMER_END(lin_final_interp, "LINEAR: final interpolation");
 }
 
 // ============================================================
@@ -1238,6 +1327,7 @@ void alignTwoVolumesNonLinear(
     Dims dims = {W, H, D};
 
     // Filter reference volume (once per scale)
+    TIMER_START(nl_ref_conv);
     nonseparableConvolution3D(q1[0], q1[1], q1[2], referenceVolume,
         filters.nonlinearReal[0].data(), filters.nonlinearImag[0].data(),
         filters.nonlinearReal[1].data(), filters.nonlinearImag[1].data(),
@@ -1248,12 +1338,15 @@ void alignTwoVolumesNonLinear(
         filters.nonlinearReal[4].data(), filters.nonlinearImag[4].data(),
         filters.nonlinearReal[5].data(), filters.nonlinearImag[5].data(),
         W, H, D);
+    TIMER_END(nl_ref_conv, "  nonlinear: ref convolution (2x)");
 
     for (int iter = 0; iter < numIterations; iter++) {
       @autoreleasepool {
+        TIMER_START(nl_iter);
         if (verbose) printf("    Nonlinear iter %d/%d\n", iter + 1, numIterations);
 
         // Filter aligned volume
+        TIMER_START(nl_align_conv);
         nonseparableConvolution3D(q2[0], q2[1], q2[2], alignedVolume,
             filters.nonlinearReal[0].data(), filters.nonlinearImag[0].data(),
             filters.nonlinearReal[1].data(), filters.nonlinearImag[1].data(),
@@ -1264,51 +1357,47 @@ void alignTwoVolumesNonLinear(
             filters.nonlinearReal[4].data(), filters.nonlinearImag[4].data(),
             filters.nonlinearReal[5].data(), filters.nonlinearImag[5].data(),
             W, H, D);
+        TIMER_END(nl_align_conv, "  nonlinear: aligned convolution (2x)");
 
-        // Reset tensor components and displacement
-        for (auto buf : {t11, t12, t13, t22, t23, t33, dux, duy, duz}) {
-            fillBuffer(buf, 0.0f, vol);
-        }
-
-        // Calculate tensor components (6 filters)
-        for (int f = 0; f < 6; f++) {
-          @autoreleasepool {
-            const float* pt = filters.projectionTensors[f];
-            id<MTLBuffer> mBufs[6];
-            for (int k = 0; k < 6; k++)
-                mBufs[k] = c.newBuffer(&pt[k], sizeof(float));
-
-            id<MTLBuffer> dimBuf = c.newBuffer(&dims, sizeof(Dims));
-
-            auto ps = c.getPipeline("calculateTensorComponents");
-            id<MTLCommandBuffer> cb = [c.queue commandBuffer];
-            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-            [enc setComputePipelineState:ps];
-            [enc setBuffer:t11 offset:0 atIndex:0];
-            [enc setBuffer:t12 offset:0 atIndex:1];
-            [enc setBuffer:t13 offset:0 atIndex:2];
-            [enc setBuffer:t22 offset:0 atIndex:3];
-            [enc setBuffer:t23 offset:0 atIndex:4];
-            [enc setBuffer:t33 offset:0 atIndex:5];
-            [enc setBuffer:q1[f] offset:0 atIndex:6];
-            [enc setBuffer:q2[f] offset:0 atIndex:7];
-            for (int k = 0; k < 6; k++)
-                [enc setBuffer:mBufs[k] offset:0 atIndex:8 + k];
-            [enc setBuffer:dimBuf offset:0 atIndex:14];
-            dispatch3D(enc, ps, W, H, D);
-            [enc endEncoding];
-            [cb commit];
-            [cb waitUntilCompleted];
-          }
-        }
-
-        // Compute tensor norms (before smoothing, for normalization)
+        // Reset tensors/displacement + compute tensor components (single CB)
+        TIMER_START(nl_tensor);
         {
             id<MTLBuffer> dimBuf = c.newBuffer(&dims, sizeof(Dims));
-            auto ps = c.getPipeline("calculateTensorNorms");
             id<MTLCommandBuffer> cb = [c.queue commandBuffer];
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-            [enc setComputePipelineState:ps];
+
+            // Zero all 9 buffers
+            for (auto buf : {t11, t12, t13, t22, t23, t33, dux, duy, duz})
+                encodeFill(enc, buf, 0.0f, vol);
+            [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+
+            // 6 tensor component dispatches (each accumulates into t11..t33)
+            auto psTensor = c.getPipeline("calculateTensorComponents");
+            for (int f = 0; f < 6; f++) {
+                const float* pt = filters.projectionTensors[f];
+                id<MTLBuffer> mBufs[6];
+                for (int k = 0; k < 6; k++)
+                    mBufs[k] = c.newBuffer(&pt[k], sizeof(float));
+
+                [enc setComputePipelineState:psTensor];
+                [enc setBuffer:t11 offset:0 atIndex:0];
+                [enc setBuffer:t12 offset:0 atIndex:1];
+                [enc setBuffer:t13 offset:0 atIndex:2];
+                [enc setBuffer:t22 offset:0 atIndex:3];
+                [enc setBuffer:t23 offset:0 atIndex:4];
+                [enc setBuffer:t33 offset:0 atIndex:5];
+                [enc setBuffer:q1[f] offset:0 atIndex:6];
+                [enc setBuffer:q2[f] offset:0 atIndex:7];
+                for (int k = 0; k < 6; k++)
+                    [enc setBuffer:mBufs[k] offset:0 atIndex:8 + k];
+                [enc setBuffer:dimBuf offset:0 atIndex:14];
+                dispatch3D(enc, psTensor, W, H, D);
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            }
+
+            // Tensor norms (pre-smooth)
+            auto psNorms = c.getPipeline("calculateTensorNorms");
+            [enc setComputePipelineState:psNorms];
             [enc setBuffer:tensorNorms offset:0 atIndex:0];
             [enc setBuffer:t11 offset:0 atIndex:1];
             [enc setBuffer:t12 offset:0 atIndex:2];
@@ -1317,24 +1406,28 @@ void alignTwoVolumesNonLinear(
             [enc setBuffer:t23 offset:0 atIndex:5];
             [enc setBuffer:t33 offset:0 atIndex:6];
             [enc setBuffer:dimBuf offset:0 atIndex:7];
-            dispatch3D(enc, ps, W, H, D);
+            dispatch3D(enc, psNorms, W, H, D);
+
             [enc endEncoding];
             [cb commit];
             [cb waitUntilCompleted];
         }
+        TIMER_END(nl_tensor, "  nonlinear: tensor+norms");
 
-        // Smooth tensor components
-        for (auto buf : {t11, t12, t13, t22, t23, t33}) {
-            performSmoothingInPlace(buf, W, H, D, smoothTensor);
-        }
+        // Smooth tensor components (batched: 6 smoothings in 1 CB)
+        TIMER_START(nl_smooth_tensor);
+        batchSmoothInPlace({t11, t12, t13, t22, t23, t33}, W, H, D, smoothTensor);
+        TIMER_END(nl_smooth_tensor, "  nonlinear: smooth tensors (6x)");
 
-        // Recompute tensor norms after smoothing
+        // Tensor norms (post-smooth) + normalize (single CB)
+        TIMER_START(nl_normalize);
         {
             id<MTLBuffer> dimBuf = c.newBuffer(&dims, sizeof(Dims));
-            auto ps = c.getPipeline("calculateTensorNorms");
             id<MTLCommandBuffer> cb = [c.queue commandBuffer];
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-            [enc setComputePipelineState:ps];
+
+            auto psNorms = c.getPipeline("calculateTensorNorms");
+            [enc setComputePipelineState:psNorms];
             [enc setBuffer:tensorNorms offset:0 atIndex:0];
             [enc setBuffer:t11 offset:0 atIndex:1];
             [enc setBuffer:t12 offset:0 atIndex:2];
@@ -1343,66 +1436,79 @@ void alignTwoVolumesNonLinear(
             [enc setBuffer:t23 offset:0 atIndex:5];
             [enc setBuffer:t33 offset:0 atIndex:6];
             [enc setBuffer:dimBuf offset:0 atIndex:7];
-            dispatch3D(enc, ps, W, H, D);
+            dispatch3D(enc, psNorms, W, H, D);
+
             [enc endEncoding];
             [cb commit];
             [cb waitUntilCompleted];
         }
 
-        // Find max tensor norm and normalize
         float maxNorm = calculateMax(tensorNorms, W, H, D);
         if (maxNorm > 0) {
             float invMax = 1.0f / maxNorm;
-            for (auto buf : {t11, t12, t13, t22, t23, t33}) {
-                multiplyVolume(buf, invMax, vol);
-            }
-        }
-
-        // Calculate A-matrices and h-vectors (6 filters)
-        for (int f = 0; f < 6; f++) {
-          @autoreleasepool {
-            struct MorphonParams { int W, H, D, FILTER; };
-            MorphonParams mp = {W, H, D, f};
-            id<MTLBuffer> mpBuf = c.newBuffer(&mp, sizeof(MorphonParams));
-
-            auto ps = c.getPipeline("calculateAMatricesAndHVectors");
             id<MTLCommandBuffer> cb = [c.queue commandBuffer];
             id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-            [enc setComputePipelineState:ps];
-            [enc setBuffer:a11 offset:0 atIndex:0];
-            [enc setBuffer:a12 offset:0 atIndex:1];
-            [enc setBuffer:a13 offset:0 atIndex:2];
-            [enc setBuffer:a22 offset:0 atIndex:3];
-            [enc setBuffer:a23 offset:0 atIndex:4];
-            [enc setBuffer:a33 offset:0 atIndex:5];
-            [enc setBuffer:h1 offset:0 atIndex:6];
-            [enc setBuffer:h2 offset:0 atIndex:7];
-            [enc setBuffer:h3 offset:0 atIndex:8];
-            [enc setBuffer:q1[f] offset:0 atIndex:9];
-            [enc setBuffer:q2[f] offset:0 atIndex:10];
-            [enc setBuffer:t11 offset:0 atIndex:11];
-            [enc setBuffer:t12 offset:0 atIndex:12];
-            [enc setBuffer:t13 offset:0 atIndex:13];
-            [enc setBuffer:t22 offset:0 atIndex:14];
-            [enc setBuffer:t23 offset:0 atIndex:15];
-            [enc setBuffer:t33 offset:0 atIndex:16];
-            [enc setBuffer:fdxBuf offset:0 atIndex:17];
-            [enc setBuffer:fdyBuf offset:0 atIndex:18];
-            [enc setBuffer:fdzBuf offset:0 atIndex:19];
-            [enc setBuffer:mpBuf offset:0 atIndex:20];
-            dispatch3D(enc, ps, W, H, D);
+            for (auto buf : {t11, t12, t13, t22, t23, t33})
+                encodeMultiply(enc, buf, invMax, vol);
             [enc endEncoding];
             [cb commit];
             [cb waitUntilCompleted];
-          }
         }
+        TIMER_END(nl_normalize, "  nonlinear: norms+normalize");
 
-        // Smooth A-matrix and h-vector components
-        for (auto buf : {a11, a12, a13, a22, a23, a33, h1, h2, h3}) {
-            performSmoothingInPlace(buf, W, H, D, smoothEq);
+        // A-matrices and h-vectors (6 filters, single CB with barriers)
+        TIMER_START(nl_amat_hvec);
+        {
+            id<MTLBuffer> dimBuf = c.newBuffer(&dims, sizeof(Dims));
+            auto ps = c.getPipeline("calculateAMatricesAndHVectors");
+
+            id<MTLCommandBuffer> cb = [c.queue commandBuffer];
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+
+            for (int f = 0; f < 6; f++) {
+                struct MorphonParams { int W, H, D, FILTER; };
+                MorphonParams mp = {W, H, D, f};
+                id<MTLBuffer> mpBuf = c.newBuffer(&mp, sizeof(MorphonParams));
+
+                [enc setComputePipelineState:ps];
+                [enc setBuffer:a11 offset:0 atIndex:0];
+                [enc setBuffer:a12 offset:0 atIndex:1];
+                [enc setBuffer:a13 offset:0 atIndex:2];
+                [enc setBuffer:a22 offset:0 atIndex:3];
+                [enc setBuffer:a23 offset:0 atIndex:4];
+                [enc setBuffer:a33 offset:0 atIndex:5];
+                [enc setBuffer:h1 offset:0 atIndex:6];
+                [enc setBuffer:h2 offset:0 atIndex:7];
+                [enc setBuffer:h3 offset:0 atIndex:8];
+                [enc setBuffer:q1[f] offset:0 atIndex:9];
+                [enc setBuffer:q2[f] offset:0 atIndex:10];
+                [enc setBuffer:t11 offset:0 atIndex:11];
+                [enc setBuffer:t12 offset:0 atIndex:12];
+                [enc setBuffer:t13 offset:0 atIndex:13];
+                [enc setBuffer:t22 offset:0 atIndex:14];
+                [enc setBuffer:t23 offset:0 atIndex:15];
+                [enc setBuffer:t33 offset:0 atIndex:16];
+                [enc setBuffer:fdxBuf offset:0 atIndex:17];
+                [enc setBuffer:fdyBuf offset:0 atIndex:18];
+                [enc setBuffer:fdzBuf offset:0 atIndex:19];
+                [enc setBuffer:mpBuf offset:0 atIndex:20];
+                dispatch3D(enc, ps, W, H, D);
+                [enc memoryBarrierWithScope:MTLBarrierScopeBuffers];
+            }
+
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
         }
+        TIMER_END(nl_amat_hvec, "  nonlinear: A-matrices+h-vectors (6f)");
 
-        // Calculate displacement update
+        // Smooth A-matrix and h-vector components (batched: 9 in 1 CB)
+        TIMER_START(nl_smooth_eq);
+        batchSmoothInPlace({a11, a12, a13, a22, a23, a33, h1, h2, h3}, W, H, D, smoothEq);
+        TIMER_END(nl_smooth_eq, "  nonlinear: smooth A+h (9x)");
+
+        // Displacement update + smooth + accumulate
+        TIMER_START(nl_disp_update);
         {
             id<MTLBuffer> dimBuf = c.newBuffer(&dims, sizeof(Dims));
             auto ps = c.getPipeline("calculateDisplacementUpdate");
@@ -1427,20 +1533,31 @@ void alignTwoVolumesNonLinear(
             [cb commit];
             [cb waitUntilCompleted];
         }
+        TIMER_END(nl_disp_update, "  nonlinear: displacement update");
 
-        // Smooth displacement update
-        for (auto buf : {dux, duy, duz}) {
-            performSmoothingInPlace(buf, W, H, D, smoothDisp);
+        // Smooth displacement (batched: 3 in 1 CB)
+        TIMER_START(nl_smooth_disp);
+        batchSmoothInPlace({dux, duy, duz}, W, H, D, smoothDisp);
+        TIMER_END(nl_smooth_disp, "  nonlinear: smooth displacement (3x)");
+
+        // Accumulate displacement (single CB)
+        {
+            id<MTLCommandBuffer> cb = [c.queue commandBuffer];
+            id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+            encodeAdd(enc, updateDispX, dux, vol);
+            encodeAdd(enc, updateDispY, duy, vol);
+            encodeAdd(enc, updateDispZ, duz, vol);
+            [enc endEncoding];
+            [cb commit];
+            [cb waitUntilCompleted];
         }
 
-        // Accumulate displacement
-        addVolumes(updateDispX, dux, vol);
-        addVolumes(updateDispY, duy, vol);
-        addVolumes(updateDispZ, duz, vol);
-
         // Interpolate from original volume with accumulated displacement
+        TIMER_START(nl_final_interp);
         interpolateNonLinear(alignedVolume, originalAligned,
                              updateDispX, updateDispY, updateDispZ, W, H, D);
+        TIMER_END(nl_final_interp, "  nonlinear: final interpolation");
+        TIMER_END(nl_iter, "  nonlinear: iteration total");
       }
     }
 }
@@ -1470,8 +1587,10 @@ void alignTwoVolumesNonLinearSeveralScales(
     fillBuffer(totalDispY, 0.0f, vol);
     fillBuffer(totalDispZ, 0.0f, vol);
 
+    TIMER_START(nl_all_scales);
     for (int scale = coarsestScale; scale >= 1; scale /= 2) {
       @autoreleasepool {
+        TIMER_START(nl_scale);
         int sW = W / scale;
         int sH = H / scale;
         int sD = D / scale;
@@ -1521,8 +1640,12 @@ void alignTwoVolumesNonLinearSeveralScales(
             addVolumes(totalDispY, updateY, vol);
             addVolumes(totalDispZ, updateZ, vol);
         }
+        char nlScaleLabel[80];
+        snprintf(nlScaleLabel, sizeof(nlScaleLabel), "NONLINEAR SCALE %d total", scale);
+        TIMER_END(nl_scale, nlScaleLabel);
       }
     }
+    TIMER_END(nl_all_scales, "NONLINEAR REGISTRATION all scales total");
 }
 
 } // anonymous namespace
@@ -1537,6 +1660,7 @@ EPIT1Result registerEPIT1(
     const QuadratureFilters& filters,
     int numIterations, int coarsestScale, int mmZCut, bool verbose)
 {
+    TIMER_START(epit1_total);
     auto& c = ctx();
 
     if (verbose) printf("registerEPIT1: EPI %dx%dx%d -> T1 %dx%dx%d\n",
@@ -1550,15 +1674,19 @@ EPIT1Result registerEPIT1(
     id<MTLBuffer> epiBuf = c.newBuffer(epiData, epiDims.size() * sizeof(float));
 
     // Resample EPI to T1 resolution and size
+    TIMER_START(epit1_resamp);
     id<MTLBuffer> epiInT1 = changeVolumesResolutionAndSize(
         epiBuf, epiDims.W, epiDims.H, epiDims.D, epiVox,
         t1Dims.W, t1Dims.H, t1Dims.D, t1Vox, mmZCut);
+
+    TIMER_END(epit1_resamp, "EPIT1: changeVolumesResolutionAndSize");
 
     // Save interpolated volume before alignment
     std::vector<float> interpResult(t1Vol);
     memcpy(interpResult.data(), [epiInT1 contents], t1Vol * sizeof(float));
 
     // Center-of-mass alignment
+    TIMER_START(epit1_com);
     float cx1, cy1, cz1, cx2, cy2, cz2;
     centerOfMass((float*)[t1Buf contents], t1Dims.W, t1Dims.H, t1Dims.D, cx1, cy1, cz1);
     centerOfMass((float*)[epiInT1 contents], t1Dims.W, t1Dims.H, t1Dims.D, cx2, cy2, cz2);
@@ -1570,16 +1698,19 @@ EPIT1Result registerEPIT1(
 
     // Apply initial translation
     interpolateLinear(epiInT1, epiInT1, initParams, t1Dims.W, t1Dims.H, t1Dims.D);
+    TIMER_END(epit1_com, "EPIT1: center-of-mass + initial align");
 
     // Multi-scale linear registration (rigid body = 6 DOF subset of 12-param affine)
     float regParams[12] = {0};
     memcpy(regParams, initParams, 12 * sizeof(float));
 
+    TIMER_START(epit1_linear);
     alignTwoVolumesLinearSeveralScales(
         epiInT1, t1Buf, filters,
         t1Dims.W, t1Dims.H, t1Dims.D,
         7, numIterations, coarsestScale,
         regParams, verbose);
+    TIMER_END(epit1_linear, "EPIT1: LINEAR REGISTRATION total");
 
     // Read back result
     EPIT1Result result;
@@ -1589,6 +1720,8 @@ EPIT1Result registerEPIT1(
 
     // Extract 6 rigid body parameters (3 translation + 3 rotation)
     for (int i = 0; i < 6; i++) result.params[i] = regParams[i];
+
+    TIMER_END(epit1_total, "EPIT1: TOTAL WALL CLOCK");
 
     return result;
 }
@@ -1602,6 +1735,7 @@ T1MNIResult registerT1MNI(
     int linearIterations, int nonlinearIterations, int coarsestScale,
     int mmZCut, bool verbose)
 {
+    TIMER_START(t1mni_total);
     auto& c = ctx();
 
     if (verbose) printf("registerT1MNI: T1 %dx%dx%d -> MNI %dx%dx%d\n",
@@ -1611,21 +1745,27 @@ T1MNIResult registerT1MNI(
     int mniVol = mniDims.size();
 
     // Upload volumes
+    TIMER_START(t1mni_upload);
     id<MTLBuffer> mniBuf = c.newBuffer(mniData, mniVol * sizeof(float));
     id<MTLBuffer> mniBrainBuf = c.newBuffer(mniBrainData, mniVol * sizeof(float));
     id<MTLBuffer> mniMaskBuf = c.newBuffer(mniMaskData, mniVol * sizeof(float));
     id<MTLBuffer> t1Buf = c.newBuffer(t1Data, t1Dims.size() * sizeof(float));
+    TIMER_END(t1mni_upload, "T1MNI: upload volumes");
 
     // Resample T1 to MNI resolution and size
+    TIMER_START(t1mni_resamp);
     id<MTLBuffer> t1InMNI = changeVolumesResolutionAndSize(
         t1Buf, t1Dims.W, t1Dims.H, t1Dims.D, t1Vox,
         mniDims.W, mniDims.H, mniDims.D, mniVox, mmZCut);
+
+    TIMER_END(t1mni_resamp, "T1MNI: changeVolumesResolutionAndSize");
 
     // Save interpolated volume
     std::vector<float> interpResult(mniVol);
     memcpy(interpResult.data(), [t1InMNI contents], mniVol * sizeof(float));
 
     // Center-of-mass alignment
+    TIMER_START(t1mni_com);
     float cx1, cy1, cz1, cx2, cy2, cz2;
     centerOfMass((float*)[mniBuf contents], mniDims.W, mniDims.H, mniDims.D, cx1, cy1, cz1);
     centerOfMass((float*)[t1InMNI contents], mniDims.W, mniDims.H, mniDims.D, cx2, cy2, cz2);
@@ -1636,6 +1776,7 @@ T1MNIResult registerT1MNI(
     initParams[2] = cz1 - cz2;
 
     interpolateLinear(t1InMNI, t1InMNI, initParams, mniDims.W, mniDims.H, mniDims.D);
+    TIMER_END(t1mni_com, "T1MNI: center-of-mass + initial align");
 
     // Linear registration
     float regParams[12] = {0};
@@ -1643,11 +1784,13 @@ T1MNIResult registerT1MNI(
 
     if (verbose) printf("Running linear registration (%d iterations)...\n", linearIterations);
 
+    TIMER_START(t1mni_linear);
     alignTwoVolumesLinearSeveralScales(
         t1InMNI, mniBuf, filters,
         mniDims.W, mniDims.H, mniDims.D,
         7, linearIterations, coarsestScale,
         regParams, verbose);
+    TIMER_END(t1mni_linear, "T1MNI: LINEAR REGISTRATION total");
 
     // Save linear result
     T1MNIResult result;
@@ -1661,11 +1804,13 @@ T1MNIResult registerT1MNI(
 
         id<MTLBuffer> totalDispX, totalDispY, totalDispZ;
 
+        TIMER_START(t1mni_nonlinear);
         alignTwoVolumesNonLinearSeveralScales(
             t1InMNI, mniBuf, filters,
             mniDims.W, mniDims.H, mniDims.D,
             nonlinearIterations, coarsestScale,
             totalDispX, totalDispY, totalDispZ, verbose);
+        TIMER_END(t1mni_nonlinear, "T1MNI: NONLINEAR REGISTRATION total");
 
         // Save nonlinear result
         result.alignedNonLinear.resize(mniVol);
@@ -1694,6 +1839,8 @@ T1MNIResult registerT1MNI(
     }
 
     result.interpolated = std::move(interpResult);
+
+    TIMER_END(t1mni_total, "T1MNI: TOTAL WALL CLOCK");
 
     return result;
 }

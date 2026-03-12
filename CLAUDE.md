@@ -170,11 +170,20 @@ See `register/README.md` for benchmark results.
 - Memory barriers between separable convolution passes
 - `@autoreleasepool` blocks for prompt Metal buffer deallocation
 
-### Stage 3: Optimization
+### Stage 3: Optimization (IN PROGRESS)
 **Objective**: Optimize Metal backend for performance parity or better than OpenCL.
 
-1. Profile Metal backend (GPU time, memory, bandwidth)
-2. Optimize memory layout (simdgroup operations, threadgroup memory)
-3. Optimize kernel dispatch (tile sizes, occupancy)
-4. Benchmark: precision, time, memory vs OpenCL reference
-5. Target: numerically equivalent results, similar memory, less wall-clock time
+**Completed optimizations**:
+1. Full 3D texture convolution kernel — single dispatch replaces 7-pass z-slice loop
+2. Command buffer batching — phase/grad/Amat 3-direction loop in single CB
+3. Batched smoothing — multiple in-place smoothings share one CB with pre-allocated temps
+4. Encoder-level helpers — fill/add/multiply encode inline instead of standalone CBs
+5. Batched tensor/Amat loops in nonlinear registration
+
+**Results**: 1.4–2× speedup over unoptimized Metal (3–5× faster than OpenCL-via-Metal).
+All NCC values unchanged. See `register/README.md` for updated benchmarks.
+
+**Remaining opportunities**:
+- MPSGraph convolution3D evaluation (macOS 13.2+)
+- SIMD shuffle / threadgroup memory for separable smoothing
+- Memory optimization (1240 MB for 1mm — 24 filter response buffers allocated upfront)
