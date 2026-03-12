@@ -156,7 +156,7 @@ def validate_epi_t1():
     t1_ref_path = os.path.join(REGISTER_DIR, 't1_brain.nii.gz')
     save_nifti(aligned_unpacked, t1_ref_path,
                os.path.join(METAL_OUT_DIR, 'epi_t1_aligned.nii.gz'))
-    interp_unpacked = unpack_volume(interpolated, t1_ref.shape) * t1_mask
+    interp_unpacked = unpack_volume(interpolated, t1_ref.shape)
     save_nifti(interp_unpacked, t1_ref_path,
                os.path.join(METAL_OUT_DIR, 'epi_t1_interpolated.nii.gz'))
     np.savetxt(os.path.join(METAL_OUT_DIR, 'epi_t1_params.txt'), params)

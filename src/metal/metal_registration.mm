@@ -774,10 +774,11 @@ id<MTLBuffer> copyVolumeToNew(id<MTLBuffer> src,
 
     id<MTLBuffer> paramBuf = c.newBuffer(&cp, sizeof(CopyParams));
 
-    // Dispatch over the smaller of src/dst dimensions
-    int dispW = std::min(srcW, dstW);
-    int dispH = std::min(srcH, dstH);
-    int dispD = std::min(srcD, dstD);
+    // Dispatch over the larger of src/dst dimensions (matching OpenCL's mymax)
+    // Kernel has bounds checks for both src and dst coordinates
+    int dispW = std::max(srcW, dstW);
+    int dispH = std::max(srcH, dstH);
+    int dispD = std::max(srcD, dstD);
 
     auto ps = c.getPipeline("copyVolumeToNew");
     id<MTLCommandBuffer> cb = [c.queue commandBuffer];
@@ -812,9 +813,16 @@ id<MTLBuffer> changeVolumesResolutionAndSize(
     int interpH = (int)roundf(srcH * scaleY);
     int interpD = (int)roundf(srcD * scaleZ);
 
+    // Use fence-post corrected scale factors: (srcDim-1)/(dstDim-1)
+    // This matches OpenCL's VOXEL_DIFFERENCE calculation and ensures
+    // the last source voxel maps exactly to the last destination voxel
+    float voxDiffX = (float)(srcW - 1) / (float)(interpW - 1);
+    float voxDiffY = (float)(srcH - 1) / (float)(interpH - 1);
+    float voxDiffZ = (float)(srcD - 1) / (float)(interpD - 1);
+
     id<MTLBuffer> interpolated = rescaleVolume(input, srcW, srcH, srcD,
                                                 interpW, interpH, interpD,
-                                                1.0f / scaleX, 1.0f / scaleY, 1.0f / scaleZ);
+                                                voxDiffX, voxDiffY, voxDiffZ);
 
     // Step 2: Copy to target dimensions (crop/pad)
     return copyVolumeToNew(interpolated, interpW, interpH, interpD,
@@ -1068,9 +1076,10 @@ void composeAffineParams3(float* resultParams, const float* oldParams, const flo
 
 id<MTLBuffer> changeVolumeSize(id<MTLBuffer> input, int srcW, int srcH, int srcD,
                                 int dstW, int dstH, int dstD) {
-    float scaleX = float(srcW) / float(dstW);
-    float scaleY = float(srcH) / float(dstH);
-    float scaleZ = float(srcD) / float(dstD);
+    // Fence-post corrected scale: (srcDim-1)/(dstDim-1) matches OpenCL
+    float scaleX = float(srcW - 1) / float(dstW - 1);
+    float scaleY = float(srcH - 1) / float(dstH - 1);
+    float scaleZ = float(srcD - 1) / float(dstD - 1);
     return rescaleVolume(input, srcW, srcH, srcD, dstW, dstH, dstD,
                          scaleX, scaleY, scaleZ);
 }
