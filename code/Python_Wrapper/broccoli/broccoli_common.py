@@ -4,8 +4,6 @@ import numpy
 from nibabel import nifti1
 
 import os
-import site
-import shutil
 
 BROCCOLI_LIB_BASE = BROCCOLI_LIB
 
@@ -15,34 +13,43 @@ BROCCOLI_LIB_BASE = BROCCOLI_LIB
 
 def load_MNI_templates(mni_file, mni_brain_file = None, mni_brain_mask_file = None):
   if not mni_brain_file:
-    mni_brain_file = mni_file.replace('.nii', '_brain.nii')
+    derived = mni_file.replace('.nii', '_brain.nii')
+    mni_brain_file = derived if os.path.exists(derived) else None
   if not mni_brain_mask_file:
-    mni_brain_mask_file = mni_file.replace('.nii', '_brain_mask.nii')
+    derived = mni_file.replace('.nii', '_brain_mask.nii')
+    mni_brain_mask_file = derived if os.path.exists(derived) else None
+
   MNI_nni = nifti1.load(mni_file)
-  MNI = MNI_nni.get_data()
-  
-  MNI_brain_nii = nifti1.load(mni_brain_file)
-  MNI_brain = MNI_brain_nii.get_data()
-  
-  MNI_brain_mask_nii = nifti1.load(mni_brain_mask_file)
-  MNI_brain_mask = MNI_brain_mask_nii.get_data()
-  
-  voxel_sizes = MNI_nni.get_header()['pixdim'][1:4]
-    
+  MNI = MNI_nni.get_fdata()
+
+  if mni_brain_file:
+    MNI_brain = nifti1.load(mni_brain_file).get_fdata()
+  else:
+    # If no separate brain file, use the MNI file itself (assumed skull-stripped)
+    MNI_brain = MNI
+
+  if mni_brain_mask_file:
+    MNI_brain_mask = nifti1.load(mni_brain_mask_file).get_fdata()
+  else:
+    # Derive mask from brain volume (non-zero voxels)
+    MNI_brain_mask = (MNI_brain > 0).astype(numpy.float32)
+
+  voxel_sizes = MNI_nni.header['pixdim'][1:4]
+
   return MNI, MNI_brain, MNI_brain_mask, voxel_sizes
 
 def load_T1(t1_file):
   T1_nni = nifti1.load(t1_file)
-  T1 = T1_nni.get_data()
-  T1_voxel_sizes = T1_nni.get_header()['pixdim'][1:4]
+  T1 = T1_nni.get_fdata()
+  T1_voxel_sizes = T1_nni.header['pixdim'][1:4]
   return T1, T1_voxel_sizes
   
 def load_EPI(epi_file, only_volume=True):
   EPI_nni = nifti1.load(epi_file)
-  EPI = EPI_nni.get_data()
-  if only_volume:
+  EPI = EPI_nni.get_fdata()
+  if only_volume and EPI.ndim == 4:
     EPI = EPI[...,0]
-  EPI_voxel_sizes = EPI_nni.get_header()['pixdim'][2:5]
+  EPI_voxel_sizes = EPI_nni.header['pixdim'][1:4]
   return EPI, EPI_voxel_sizes
 
 _pack_permutation = (2, 0, 1)
@@ -65,16 +72,20 @@ class BROCCOLI_LIB(BROCCOLI_LIB_BASE):
       self.OpenCLInitiate(*args)
       
   def OpenCLInitiate(self, platform, device):
-    if not os.path.exists('broccoli_lib_kernel.cpp'):
-      for s in site.getsitepackages():
-        if os.path.exists(os.path.join(s, 'broccoli/broccoli_lib_kernel.cpp')):
-          shutil.copy(os.path.join(s, 'broccoli/broccoli_lib_kernel.cpp'), os.getcwd())
+    # Set BROCCOLI_DIR so the C++ code can find kernel files in code/Kernels/
+    broccoli_dir = os.environ.get('BROCCOLI_DIR')
+    if not broccoli_dir:
+      # Auto-detect: walk up from this file to find the repo root
+      candidate = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+      while candidate != os.path.dirname(candidate):
+        if os.path.isdir(os.path.join(candidate, 'code', 'Kernels')):
+          broccoli_dir = candidate + '/'
           break
-      
-    if os.path.exists('broccoli_lib_kernel.cpp'):
-      BROCCOLI_LIB_BASE.OpenCLInitiate(self, platform, device)
-    else:
-      raise RuntimeError('could not find broccoli_lib_kernel.cpp in current directory or in site-packages')
+        candidate = os.path.dirname(candidate)
+    if broccoli_dir:
+      os.environ['BROCCOLI_DIR'] = broccoli_dir
+      self.SetWrapper(2)  # BASH=2, so it uses BROCCOLI_DIR env var
+    BROCCOLI_LIB_BASE.OpenCLInitiate(self, platform, device)
     
   def SetEPIData(self, array, voxel_sizes):
     self.SetEPIHeight(array.shape[0])
@@ -84,20 +95,24 @@ class BROCCOLI_LIB(BROCCOLI_LIB_BASE):
     t = self.packVolume(array)
     self.SetInputEPIVolume(t)
 
-    self.SetEPIVoxelSizeX(voxel_sizes[0])
-    self.SetEPIVoxelSizeY(voxel_sizes[1])
+    # VoxelSizeX maps to Width(j), Y to Height(i), Z to Depth(k)
+    # NIfTI pixdim order is (i, j, k), so swap [0] and [1]
+    self.SetEPIVoxelSizeX(voxel_sizes[1])
+    self.SetEPIVoxelSizeY(voxel_sizes[0])
     self.SetEPIVoxelSizeZ(voxel_sizes[2])
     
   def SetT1Data(self, array, voxel_sizes):
     self.SetT1Height(array.shape[0])
     self.SetT1Width(array.shape[1])
     self.SetT1Depth(array.shape[2])
+    self.SetT1Timepoints(array.shape[3] if array.ndim == 4 else 1)
 
     t = self.packVolume(array)
     self.SetInputT1Volume(t)
 
-    self.SetT1VoxelSizeX(voxel_sizes[0])
-    self.SetT1VoxelSizeY(voxel_sizes[1])
+    # VoxelSizeX maps to Width(j), Y to Height(i), Z to Depth(k)
+    self.SetT1VoxelSizeX(voxel_sizes[1])
+    self.SetT1VoxelSizeY(voxel_sizes[0])
     self.SetT1VoxelSizeZ(voxel_sizes[2])
     
   def SetMNIData(self, array, voxel_sizes):
@@ -108,8 +123,9 @@ class BROCCOLI_LIB(BROCCOLI_LIB_BASE):
     t = self.packVolume(array)
     self.SetInputMNIVolume(t)
 
-    self.SetMNIVoxelSizeX(voxel_sizes[0])
-    self.SetMNIVoxelSizeY(voxel_sizes[1])
+    # VoxelSizeX maps to Width(j), Y to Height(i), Z to Depth(k)
+    self.SetMNIVoxelSizeX(voxel_sizes[1])
+    self.SetMNIVoxelSizeY(voxel_sizes[0])
     self.SetMNIVoxelSizeZ(voxel_sizes[2])
 
   def SetfMRIData(self, array, voxel_sizes):
@@ -121,8 +137,9 @@ class BROCCOLI_LIB(BROCCOLI_LIB_BASE):
     t = self.packVolume(array)
     self.SetInputfMRIVolumes(t)
 
-    self.SetEPIVoxelSizeX(voxel_sizes[0])
-    self.SetEPIVoxelSizeY(voxel_sizes[1])
+    # VoxelSizeX maps to Width(j), Y to Height(i), Z to Depth(k)
+    self.SetEPIVoxelSizeX(voxel_sizes[1])
+    self.SetEPIVoxelSizeY(voxel_sizes[0])
     self.SetEPIVoxelSizeZ(voxel_sizes[2])
 
   def SetParametricImageRegistrationFilters(self, filters):
@@ -130,14 +147,14 @@ class BROCCOLI_LIB(BROCCOLI_LIB_BASE):
     for i in range(3):
       args.append(self.packVolume(numpy.real(filters[i])))
       args.append(self.packVolume(numpy.imag(filters[i])))
-    BROCCOLI_LIB_BASE.SetParametricImageRegistrationFilters(self, *args)
-    
+    BROCCOLI_LIB_BASE.SetLinearImageRegistrationFilters(self, *args)
+
   def SetNonParametricImageRegistrationFilters(self, filters):
     args = []
     for i in range(6):
       args.append(self.packVolume(numpy.real(filters[i])))
       args.append(self.packVolume(numpy.imag(filters[i])))
-    BROCCOLI_LIB_BASE.SetNonParametricImageRegistrationFilters(self, *args)
+    BROCCOLI_LIB_BASE.SetNonLinearImageRegistrationFilters(self, *args)
     
   def SetProjectionTensorMatrixFilters(self, filters):
     self.SetProjectionTensorMatrixFirstFilter(*filters[0])

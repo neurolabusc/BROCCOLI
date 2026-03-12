@@ -23,9 +23,9 @@
     DEALINGS IN THE SOFTWARE.
 */
 
-#include <Eigenvalues> 
+#include "Eigen/Eigenvalues"
 #include <limits>
-#include <Dense>
+#include "Eigen/Dense"
 #include <stdio.h>
 #include <math.h>
 #include <stdlib.h>
@@ -1866,12 +1866,14 @@ bool BROCCOLI_LIB::OpenCLInitiate(cl_uint OPENCL_PLATFORM, cl_uint OPENCL_DEVICE
 		{
 			printf("One or several kernels were not created correctly, check buildInfo* !\n");
 		}
+		SUCCESSFUL_INITIALIZATION = true;
 		return true;
 	}
 	else
 	{
 		INITIALIZATION_ERROR = "";
 		OPENCL_ERROR = "";
+		SUCCESSFUL_INITIALIZATION = true;
 		return true;
 	}
 }
@@ -4358,6 +4360,11 @@ void BROCCOLI_LIB::SetOutputAlignedT1VolumeNonLinear(float* aligned)
 void BROCCOLI_LIB::SetOutputAlignedEPIVolumeT1(float* aligned)
 {
 	h_Aligned_EPI_Volume_T1 = aligned;
+}
+
+void BROCCOLI_LIB::SetOutputAlignedEPIVolumeMNI(float* aligned)
+{
+	h_Aligned_EPI_Volume_MNI_Linear = aligned;
 }
 
 void BROCCOLI_LIB::SetOutputAlignedEPIVolumeMNILinear(float* aligned)

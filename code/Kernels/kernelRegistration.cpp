@@ -930,16 +930,31 @@ __kernel void CalculateAMatricesAndHVectors(__global float* a11,
     tt23 = t12[idx] * t13[idx] + t22[idx] * t23[idx] + t23[idx] * t33[idx];
     tt33 = t13[idx] * t13[idx] + t23[idx] * t23[idx] + t33[idx] * t33[idx];
 
-	a11[idx] += certainty * tt11;
-	a12[idx] += certainty * tt12;
-	a13[idx] += certainty * tt13;
-	a22[idx] += certainty * tt22;
-	a23[idx] += certainty * tt23;
-	a33[idx] += certainty * tt33;
-
-	h1[idx] += certainty * phase_difference * (c_Filter_Directions_X[FILTER] * tt11 + c_Filter_Directions_Y[FILTER] * tt12 + c_Filter_Directions_Z[FILTER] * tt13);
-	h2[idx] += certainty * phase_difference * (c_Filter_Directions_X[FILTER] * tt12 + c_Filter_Directions_Y[FILTER] * tt22 + c_Filter_Directions_Z[FILTER] * tt23);
-	h3[idx] += certainty * phase_difference * (c_Filter_Directions_X[FILTER] * tt13 + c_Filter_Directions_Y[FILTER] * tt23 + c_Filter_Directions_Z[FILTER] * tt33);
+	// FILTER==0: use assignment to clear stale data in d_a11 (reused for tensor norms)
+	if (FILTER == 0)
+	{
+		a11[idx] = certainty * tt11;
+		a12[idx] = certainty * tt12;
+		a13[idx] = certainty * tt13;
+		a22[idx] = certainty * tt22;
+		a23[idx] = certainty * tt23;
+		a33[idx] = certainty * tt33;
+		h1[idx] = certainty * phase_difference * (c_Filter_Directions_X[FILTER] * tt11 + c_Filter_Directions_Y[FILTER] * tt12 + c_Filter_Directions_Z[FILTER] * tt13);
+		h2[idx] = certainty * phase_difference * (c_Filter_Directions_X[FILTER] * tt12 + c_Filter_Directions_Y[FILTER] * tt22 + c_Filter_Directions_Z[FILTER] * tt23);
+		h3[idx] = certainty * phase_difference * (c_Filter_Directions_X[FILTER] * tt13 + c_Filter_Directions_Y[FILTER] * tt23 + c_Filter_Directions_Z[FILTER] * tt33);
+	}
+	else
+	{
+		a11[idx] += certainty * tt11;
+		a12[idx] += certainty * tt12;
+		a13[idx] += certainty * tt13;
+		a22[idx] += certainty * tt22;
+		a23[idx] += certainty * tt23;
+		a33[idx] += certainty * tt33;
+		h1[idx] += certainty * phase_difference * (c_Filter_Directions_X[FILTER] * tt11 + c_Filter_Directions_Y[FILTER] * tt12 + c_Filter_Directions_Z[FILTER] * tt13);
+		h2[idx] += certainty * phase_difference * (c_Filter_Directions_X[FILTER] * tt12 + c_Filter_Directions_Y[FILTER] * tt22 + c_Filter_Directions_Z[FILTER] * tt23);
+		h3[idx] += certainty * phase_difference * (c_Filter_Directions_X[FILTER] * tt13 + c_Filter_Directions_Y[FILTER] * tt23 + c_Filter_Directions_Z[FILTER] * tt33);
+	}
 }
 
 
@@ -980,8 +995,12 @@ __kernel void CalculateDisplacementUpdate(__global float* DisplacementX,
 	float h2Temp = h2[idx];
 	float h3Temp = h3[idx];
 
-	float norm = 1.0f / (a11Temp * a22Temp * a33Temp - a11Temp * a23Temp * a23Temp - a12Temp * a12Temp * a33Temp + a12Temp * a23Temp * a13Temp + a13Temp * a12Temp * a23Temp - a13Temp * a22Temp * a13Temp + 1E-16f);
-		
+	float det = a11Temp * a22Temp * a33Temp - a11Temp * a23Temp * a23Temp - a12Temp * a12Temp * a33Temp + a12Temp * a23Temp * a13Temp + a13Temp * a12Temp * a23Temp - a13Temp * a22Temp * a13Temp;
+	// Regularized inversion with step size damping
+	float trace = a11Temp + a22Temp + a33Temp;
+	float epsilon = 0.01f * trace * trace * trace / 27.0f + 1E-16f;
+	float norm = 0.2f / (det + epsilon);
+
 	DisplacementX[idx] = norm * ((h3Temp * (a12Temp * a23Temp - a13Temp * a22Temp)) - (h2Temp * (a12Temp * a33Temp - a13Temp * a23Temp)) + (h1Temp * (a22Temp * a33Temp - a23Temp * a23Temp)));
 	DisplacementY[idx] = norm * ((h2Temp * (a11Temp * a33Temp - a13Temp * a13Temp)) - (h3Temp * (a11Temp * a23Temp - a13Temp * a12Temp)) - (h1Temp * (a12Temp * a33Temp - a23Temp * a13Temp)));
 	DisplacementZ[idx] = norm * ((h3Temp * (a11Temp * a22Temp - a12Temp * a12Temp)) - (h2Temp * (a11Temp * a23Temp - a12Temp * a13Temp)) + (h1Temp * (a12Temp * a23Temp - a22Temp * a13Temp)));

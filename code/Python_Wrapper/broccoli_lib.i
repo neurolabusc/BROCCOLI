@@ -17,14 +17,28 @@
 %}
 
 %numpy_typemaps(float, NPY_FLOAT, int)
-%apply (float INPLACE_ARRAY1[ANY]) {(float* )}
-%apply (int INPLACE_ARRAY1[ANY]) {(int* )}
+
+/* Accept any contiguous float numpy array as float* */
+%typemap(in) float* {
+    PyArrayObject* tmp = (PyArrayObject*)PyArray_FROM_OTF($input, NPY_FLOAT, NPY_ARRAY_C_CONTIGUOUS | NPY_ARRAY_ALIGNED);
+    if (!tmp) SWIG_fail;
+    $1 = (float*) PyArray_DATA(tmp);
+    Py_DECREF(tmp);
+}
+
+/* Accept any contiguous int numpy array as int* (input) */
+%typemap(in) int* {
+    PyArrayObject* tmp = (PyArrayObject*)PyArray_FROM_OTF($input, NPY_INT, NPY_ARRAY_C_CONTIGUOUS | NPY_ARRAY_ALIGNED);
+    if (!tmp) SWIG_fail;
+    $1 = (int*) PyArray_DATA(tmp);
+    Py_DECREF(tmp);
+}
 
 %typemap(out) int *
 {
     $result = PyList_New(200);
     for (int i = 0; i < 200; ++i) {
-        PyList_SetItem($result, i, PyInt_FromLong($1[i]));
+        PyList_SetItem($result, i, PyLong_FromLong($1[i]));
     }
 }
 

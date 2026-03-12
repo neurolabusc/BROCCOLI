@@ -1,0 +1,26 @@
+# Data and reference outputs (keep the README)
+register/*
+!register/README.md
+
+# Compiled objects and libraries
+*.o
+*.so
+*.dylib
+
+# Python
+*.pyc
+__pycache__/
+*.egg-info/
+
+# SWIG generated
+*_wrap.cxx
+*_wrap.c
+
+# macOS
+.DS_Store
+
+# Compiled OpenCL kernel binaries
+compiled/Kernels/*.bin
+
+# Build artifacts
+buildInfo*

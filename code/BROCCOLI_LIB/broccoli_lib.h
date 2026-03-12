@@ -31,7 +31,7 @@
 #include <opencl.h>
 #include <string>
 #include <vector>
-#include <Dense>
+#include "Eigen/Dense"
 
 typedef unsigned int uint;
 typedef unsigned char uchar;
