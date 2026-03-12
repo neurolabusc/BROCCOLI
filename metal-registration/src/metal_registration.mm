@@ -3,7 +3,10 @@
 
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
-// Accelerate framework no longer needed — using custom Gaussian elimination
+#ifdef USE_MPSGRAPH_FFT
+#import <MetalPerformanceShadersGraph/MetalPerformanceShadersGraph.h>
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
+#endif
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -345,6 +348,152 @@ float calculateMax(id<MTLBuffer> volume, int W, int H, int D) {
 //  3D Nonseparable Convolution (3 quadrature filters)
 // ============================================================
 
+#ifdef USE_MPSGRAPH_FFT
+
+// FFT-based convolution via MPSGraph (macOS 14.0+).
+// Batches all 6 filter components (3 filters × real/imag) into a single
+// graph execution: 1 volume FFT + 6 filter FFTs + 6 IFFTs.
+void nonseparableConvolution3D(
+    id<MTLBuffer> resp1, id<MTLBuffer> resp2, id<MTLBuffer> resp3,
+    id<MTLBuffer> volume,
+    const float* filterReal1, const float* filterImag1,
+    const float* filterReal2, const float* filterImag2,
+    const float* filterReal3, const float* filterImag3,
+    int W, int H, int D)
+{
+    TIMER_START(conv3d_fft);
+    auto& c = ctx();
+    int vol = W * H * D;
+
+    // Pad dimensions to avoid circular wrap-around (filter radius = 3)
+    int padW = W + 6, padH = H + 6, padD = D + 6;
+    int padVol = padW * padH * padD;
+
+    // Pad volume (zero beyond original extent)
+    TIMER_START(conv3d_pad);
+    std::vector<float> pVol(padVol, 0.0f);
+    const float* vp = (const float*)[volume contents];
+    for (int z = 0; z < D; z++)
+        for (int y = 0; y < H; y++)
+            memcpy(&pVol[y * padW + z * padW * padH],
+                   &vp[y * W + z * W * H], W * sizeof(float));
+
+    // Pad and center 6 filter components (wrap-around for circular conv)
+    const float* fps[6] = {filterReal1, filterImag1,
+                           filterReal2, filterImag2,
+                           filterReal3, filterImag3};
+    std::vector<float> pFilt(6 * padVol, 0.0f);
+    for (int fi = 0; fi < 6; fi++) {
+        float* dst = &pFilt[fi * padVol];
+        for (int fz = 0; fz < 7; fz++)
+            for (int fy = 0; fy < 7; fy++)
+                for (int fx = 0; fx < 7; fx++) {
+                    int px = ((fx - 3) + padW) % padW;
+                    int py = ((fy - 3) + padH) % padH;
+                    int pz = ((fz - 3) + padD) % padD;
+                    dst[px + py * padW + pz * padW * padH] =
+                        fps[fi][fx + fy * 7 + fz * 49];
+                }
+    }
+    TIMER_END(conv3d_pad, "  conv3D FFT: pad");
+
+    // Upload padded data to GPU
+    id<MTLBuffer> volBuf = c.newBuffer(pVol.data(), padVol * sizeof(float));
+    id<MTLBuffer> filtBuf = c.newBuffer(pFilt.data(), 6 * padVol * sizeof(float));
+
+    // Build/cache MPSGraph per volume dimensions
+    static MPSGraph* cachedGraph = nil;
+    static MPSGraphTensor* cachedVolIn = nil;
+    static MPSGraphTensor* cachedFiltIn = nil;
+    static MPSGraphTensor* cachedResult = nil;
+    static int cachedW = 0, cachedH = 0, cachedD = 0;
+
+    if (!cachedGraph || cachedW != W || cachedH != H || cachedD != D) {
+        cachedGraph = [[MPSGraph alloc] init];
+        cachedW = W; cachedH = H; cachedD = D;
+
+        NSArray<NSNumber*>* vShape = @[@1, @(padD), @(padH), @(padW)];
+        NSArray<NSNumber*>* fShape = @[@6, @(padD), @(padH), @(padW)];
+
+        cachedVolIn = [cachedGraph placeholderWithShape:vShape
+                                              dataType:MPSDataTypeFloat32 name:@"v"];
+        cachedFiltIn = [cachedGraph placeholderWithShape:fShape
+                                               dataType:MPSDataTypeFloat32 name:@"f"];
+
+        NSArray<NSNumber*>* axes = @[@1, @2, @3];
+
+        MPSGraphFFTDescriptor* fwd = [MPSGraphFFTDescriptor descriptor];
+        fwd.inverse = NO;
+        fwd.scalingMode = MPSGraphFFTScalingModeNone;
+
+        MPSGraphFFTDescriptor* inv = [MPSGraphFFTDescriptor descriptor];
+        inv.inverse = YES;
+        inv.scalingMode = MPSGraphFFTScalingModeSize;
+
+        // Forward FFTs (volume broadcasts across batch dim of filters)
+        MPSGraphTensor* vFFT = [cachedGraph realToHermiteanFFTWithTensor:cachedVolIn
+                                    axes:axes descriptor:fwd name:@"vfft"];
+        MPSGraphTensor* fFFT = [cachedGraph realToHermiteanFFTWithTensor:cachedFiltIn
+                                    axes:axes descriptor:fwd name:@"ffft"];
+
+        // Complex multiply: [1,...] × [6,...] → [6,...] via broadcast
+        MPSGraphTensor* prod = [cachedGraph multiplicationWithPrimaryTensor:vFFT
+                                    secondaryTensor:fFFT name:@"prod"];
+
+        // Inverse FFT → [6, padD, padH, padW] real
+        MPSGraphTensor* conv = [cachedGraph HermiteanToRealFFTWithTensor:prod
+                                    axes:axes descriptor:inv name:@"ifft"];
+
+        // Crop to [6, D, H, W]
+        cachedResult = [cachedGraph sliceTensor:conv
+                            starts:@[@0, @0, @0, @0]
+                            ends:@[@6, @(D), @(H), @(W)]
+                            strides:@[@1, @1, @1, @1]
+                            name:@"crop"];
+    }
+
+    // Create tensor data from MTLBuffers
+    MPSGraphTensorData* volTD = [[MPSGraphTensorData alloc]
+        initWithMTLBuffer:volBuf
+                    shape:@[@1, @(padD), @(padH), @(padW)]
+                 dataType:MPSDataTypeFloat32];
+    MPSGraphTensorData* filtTD = [[MPSGraphTensorData alloc]
+        initWithMTLBuffer:filtBuf
+                    shape:@[@6, @(padD), @(padH), @(padW)]
+                 dataType:MPSDataTypeFloat32];
+
+    // Execute graph (single call does all 6 convolutions)
+    TIMER_START(conv3d_graph);
+    NSDictionary<MPSGraphTensor*, MPSGraphTensorData*>* results =
+        [cachedGraph runWithMTLCommandQueue:c.queue
+            feeds:@{cachedVolIn: volTD, cachedFiltIn: filtTD}
+            targetTensors:@[cachedResult]
+            targetOperations:nil];
+    TIMER_END(conv3d_graph, "  conv3D FFT: graph exec");
+
+    // Read results [6, D, H, W] → interleave into 3 float2 response buffers
+    TIMER_START(conv3d_readback);
+    MPSGraphTensorData* resTD = results[cachedResult];
+    std::vector<float> resData(6 * vol);
+    [[resTD mpsndarray] readBytes:resData.data() strideBytes:nil];
+
+    float* r1 = (float*)[resp1 contents];
+    float* r2 = (float*)[resp2 contents];
+    float* r3 = (float*)[resp3 contents];
+    for (int i = 0; i < vol; i++) {
+        r1[2*i]   = resData[0 * vol + i];  // filter1 real
+        r1[2*i+1] = resData[1 * vol + i];  // filter1 imag
+        r2[2*i]   = resData[2 * vol + i];  // filter2 real
+        r2[2*i+1] = resData[3 * vol + i];  // filter2 imag
+        r3[2*i]   = resData[4 * vol + i];  // filter3 real
+        r3[2*i+1] = resData[5 * vol + i];  // filter3 imag
+    }
+    TIMER_END(conv3d_readback, "  conv3D FFT: readback");
+    TIMER_END(conv3d_fft, "  conv3D FFT total");
+}
+
+#else  // Spatial convolution via texture3D (default)
+
 void nonseparableConvolution3D(
     id<MTLBuffer> resp1, id<MTLBuffer> resp2, id<MTLBuffer> resp3,
     id<MTLBuffer> volume,
@@ -394,6 +543,8 @@ void nonseparableConvolution3D(
     [cb waitUntilCompleted];
     TIMER_END(conv3d, "  conv3D total");
 }
+
+#endif  // USE_MPSGRAPH_FFT
 
 // ============================================================
 //  Separable smoothing (3-pass: rows, columns, rods)
