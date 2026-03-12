@@ -132,10 +132,8 @@ def validate_epi_t1():
     t1_img = nib.load(os.path.join(REGISTER_DIR, 't1_brain.nii.gz'))
     t1_ref = t1_img.get_fdata().astype(np.float32)
 
-    # Unpack aligned for NCC (mask by T1 > 0, same as OpenCL Python wrapper)
+    # Unpack aligned volume — no mask burned in, output preserves all FOV data
     aligned_unpacked = unpack_volume(aligned, t1_ref.shape)
-    t1_mask = (t1_ref > 0).astype(np.float32)
-    aligned_unpacked = aligned_unpacked * t1_mask
     ncc_val = ncc(aligned_unpacked, t1_ref)
 
     print(f"  Time: {dt:.2f}s")

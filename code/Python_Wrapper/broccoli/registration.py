@@ -139,10 +139,6 @@ def registerEPIT1(
   h_Interpolated_EPI_Volume = BROCCOLI.unpackOutputVolume(h_Interpolated_EPI_Volume, T1_DATA_SHAPE)
   h_Aligned_EPI_Volume = BROCCOLI.unpackOutputVolume(h_Aligned_EPI_Volume, T1_DATA_SHAPE)
 
-  # Mask aligned volume: zero out voxels outside the reference (T1) brain
-  ref_mask = (h_T1_Data_orig > 0).astype(numpy.float32)
-  h_Aligned_EPI_Volume = h_Aligned_EPI_Volume * ref_mask
-
   # Extract the 6 rigid-body parameters from the 12 affine parameters
   h_Registration_Parameters_6 = h_Registration_Parameters[:6]
   print(h_Registration_Parameters_6)
