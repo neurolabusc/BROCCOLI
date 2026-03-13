@@ -273,7 +273,7 @@ PYBIND11_MODULE(metal_registration, m) {
         py::arg("filter_directions"),
         py::arg("num_iterations") = 20,
         py::arg("coarsest_scale") = 8,
-        py::arg("mm_z_cut") = 30,
+        py::arg("mm_z_cut") = 0,
         py::arg("opencl_platform") = 0,
         py::arg("opencl_device") = 0,
         py::arg("verbose") = false);
@@ -290,7 +290,7 @@ PYBIND11_MODULE(metal_registration, m) {
         py::arg("linear_iterations") = 10,
         py::arg("nonlinear_iterations") = 5,
         py::arg("coarsest_scale") = 4,
-        py::arg("mm_z_cut") = 30,
+        py::arg("mm_z_cut") = 0,
         py::arg("opencl_platform") = 0,
         py::arg("opencl_device") = 0,
         py::arg("verbose") = false);

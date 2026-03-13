@@ -103,7 +103,7 @@
 
 #define PI 3.14159265359
 
-#define INITIAL_MM_T1_Z_CUT 15
+#define INITIAL_MM_T1_Z_CUT -1  // -1 = disabled (no z-cut)
 
 #define SUCCESS 0
 #define FAIL 1

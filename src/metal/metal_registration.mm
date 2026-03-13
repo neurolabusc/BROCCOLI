@@ -1851,9 +1851,10 @@ EPIT1Result registerEPIT1(
     centerOfMass((float*)[epiInT1 contents], t1Dims.W, t1Dims.H, t1Dims.D, cx2, cy2, cz2);
 
     float initParams[12] = {0};
-    initParams[0] = cx2 - cx1;
-    initParams[1] = cy2 - cy1;
-    initParams[2] = cz2 - cz1;
+    // Round to integers to avoid interpolation blur (matches OpenCL's myround)
+    initParams[0] = roundf(cx2 - cx1);
+    initParams[1] = roundf(cy2 - cy1);
+    initParams[2] = roundf(cz2 - cz1);
 
     // Apply initial translation
     interpolateLinear(epiInT1, epiInT1, initParams, t1Dims.W, t1Dims.H, t1Dims.D);
@@ -1932,9 +1933,10 @@ T1MNIResult registerT1MNI(
     centerOfMass((float*)[t1InMNI contents], mniDims.W, mniDims.H, mniDims.D, cx2, cy2, cz2);
 
     float initParams[12] = {0};
-    initParams[0] = cx2 - cx1;
-    initParams[1] = cy2 - cy1;
-    initParams[2] = cz2 - cz1;
+    // Round to integers to avoid interpolation blur (matches OpenCL's myround)
+    initParams[0] = roundf(cx2 - cx1);
+    initParams[1] = roundf(cy2 - cy1);
+    initParams[2] = roundf(cz2 - cz1);
 
     interpolateLinear(t1InMNI, t1InMNI, initParams, mniDims.W, mniDims.H, mniDims.D);
     TIMER_END(t1mni_com, "T1MNI: center-of-mass + initial align");
@@ -1945,7 +1947,6 @@ T1MNIResult registerT1MNI(
 
     // Linear registration
     float regParams[12] = {0};
-    memcpy(regParams, initParams, 12 * sizeof(float));
 
     if (verbose) printf("Running linear registration (%d iterations)...\n", linearIterations);
 
@@ -1957,10 +1958,26 @@ T1MNIResult registerT1MNI(
         regParams, verbose);
     TIMER_END(t1mni_linear, "T1MNI: LINEAR REGISTRATION total");
 
-    // Save linear result
+    // Compose COM shift into registration params (matches OpenCL line 8042:
+    // AddAffineRegistrationParameters(regParams, matchParams))
+    // composeAffineParams(old, new) = New * Old → stored in old
+    // We want: T_com * T_aff → stored in regParams
+    composeAffineParams(regParams, initParams);
+
+    // Save linear result — re-rescale original T1 and apply combined
+    // COM + affine in a single interpolation to avoid compounded blur
+    // (matches OpenCL's "do total interpolation in one step" pattern)
     T1MNIResult result;
-    result.alignedLinear.resize(mniVol);
-    memcpy(result.alignedLinear.data(), [t1InMNI contents], mniVol * sizeof(float));
+    {
+        TIMER_START(t1mni_linear_resample);
+        id<MTLBuffer> freshT1 = changeVolumesResolutionAndSize(
+            t1Buf, t1Dims.W, t1Dims.H, t1Dims.D, t1Vox,
+            mniDims.W, mniDims.H, mniDims.D, mniVox, mmZCut);
+        interpolateLinear(freshT1, freshT1, regParams, mniDims.W, mniDims.H, mniDims.D);
+        result.alignedLinear.resize(mniVol);
+        memcpy(result.alignedLinear.data(), [freshT1 contents], mniVol * sizeof(float));
+        TIMER_END(t1mni_linear_resample, "T1MNI: linear single-step resample");
+    }
     for (int i = 0; i < 12; i++) result.params[i] = regParams[i];
 
     // Nonlinear registration
@@ -1977,11 +1994,7 @@ T1MNIResult registerT1MNI(
             totalDispX, totalDispY, totalDispZ, verbose);
         TIMER_END(t1mni_nonlinear, "T1MNI: NONLINEAR REGISTRATION total");
 
-        // Save nonlinear result
-        result.alignedNonLinear.resize(mniVol);
-        memcpy(result.alignedNonLinear.data(), [t1InMNI contents], mniVol * sizeof(float));
-
-        // Combine linear + nonlinear displacement
+        // Combine linear + nonlinear displacement into single field
         addLinearNonLinearDisplacement(totalDispX, totalDispY, totalDispZ,
                                        regParams, mniDims.W, mniDims.H, mniDims.D);
 
@@ -1993,11 +2006,24 @@ T1MNIResult registerT1MNI(
         memcpy(result.dispY.data(), [totalDispY contents], mniVol * sizeof(float));
         memcpy(result.dispZ.data(), [totalDispZ contents], mniVol * sizeof(float));
 
-        // Skullstrip: multiply by MNI brain mask
-        id<MTLBuffer> ssBuf = c.newBuffer([t1InMNI contents], mniVol * sizeof(float));
-        multiplyVolumes(ssBuf, mniMaskBuf, mniVol);
-        result.skullstripped.resize(mniVol);
-        memcpy(result.skullstripped.data(), [ssBuf contents], mniVol * sizeof(float));
+        // Re-rescale original T1 and apply combined displacement in one step
+        // (rescale + single interpolation = 2 passes, not 4)
+        TIMER_START(t1mni_nonlinear_resample);
+        {
+            id<MTLBuffer> freshT1 = changeVolumesResolutionAndSize(
+                t1Buf, t1Dims.W, t1Dims.H, t1Dims.D, t1Vox,
+                mniDims.W, mniDims.H, mniDims.D, mniVox, mmZCut);
+            interpolateNonLinear(freshT1, freshT1, totalDispX, totalDispY, totalDispZ,
+                                 mniDims.W, mniDims.H, mniDims.D);
+            result.alignedNonLinear.resize(mniVol);
+            memcpy(result.alignedNonLinear.data(), [freshT1 contents], mniVol * sizeof(float));
+
+            // Skullstrip from the single-step result
+            multiplyVolumes(freshT1, mniMaskBuf, mniVol);
+            result.skullstripped.resize(mniVol);
+            memcpy(result.skullstripped.data(), [freshT1 contents], mniVol * sizeof(float));
+        }
+        TIMER_END(t1mni_nonlinear_resample, "T1MNI: nonlinear single-step resample");
     } else {
         result.alignedNonLinear = result.alignedLinear;
         result.skullstripped.resize(mniVol, 0);

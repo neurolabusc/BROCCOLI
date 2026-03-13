@@ -60,7 +60,7 @@ EPIT1Result registerEPIT1(
     const QuadratureFilters& filters,
     int numIterations = 20,
     int coarsestScale = 8,
-    int mmZCut = 30,
+    int mmZCut = 0,
     bool verbose = false);
 
 T1MNIResult registerT1MNI(
@@ -72,7 +72,7 @@ T1MNIResult registerT1MNI(
     int linearIterations = 10,
     int nonlinearIterations = 5,
     int coarsestScale = 4,
-    int mmZCut = 30,
+    int mmZCut = 0,
     bool verbose = false);
 
 } // namespace metal_reg

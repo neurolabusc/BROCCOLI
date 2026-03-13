@@ -2,7 +2,7 @@
 
 GPU-accelerated spatial normalization (image registration) for NIfTI volumes.
 
-Extracted from [BROCCOLI](https://github.com/wanderine/BROCCOLI) (Eklund et al., 2014) with a pluggable backend architecture supporting Metal and OpenCL.
+Extracted from [BROCCOLI](https://github.com/wanderine/BROCCOLI) (Eklund et al., 2014) with a pluggable backend architecture supporting Metal, OpenCL, and WebGPU.
 
 ## Features
 
@@ -12,6 +12,7 @@ Extracted from [BROCCOLI](https://github.com/wanderine/BROCCOLI) (Eklund et al.,
 - FLIRT-compatible CLI interface
 - Metal backend (macOS Apple Silicon) — fast, default on macOS
 - OpenCL backend — cross-platform (macOS, Linux)
+- WebGPU backend — cross-platform via wgpu-native (macOS, Linux, Windows)
 
 ## Build
 
@@ -22,6 +23,7 @@ cd src
 make                    # auto-detect backend (Metal on macOS)
 make BACKEND=metal      # force Metal backend
 make BACKEND=opencl     # force OpenCL backend
+make BACKEND=webgpu     # WebGPU backend (requires wgpu-native)
 ```
 
 ### Metal backend (macOS)
@@ -37,6 +39,22 @@ The OpenCL backend also requires filter files and the `BROCCOLI_DIR` environment
 ```bash
 export BROCCOLI_DIR=$(pwd)/opencl/
 ```
+
+### WebGPU backend
+
+Requires [wgpu-native](https://github.com/gfx-rs/wgpu-native/releases) headers and library. Set `WGPU_DIR` to the extracted directory (must contain `include/` and `lib/`):
+
+```bash
+make BACKEND=webgpu WGPU_DIR=/path/to/wgpu-native
+```
+
+On macOS, ensure `DYLD_LIBRARY_PATH` includes the wgpu-native lib directory at runtime, or install the library system-wide:
+
+```bash
+DYLD_LIBRARY_PATH=/path/to/wgpu-native/lib ./broccolini ...
+```
+
+The WebGPU backend uses WGSL compute shaders (embedded in the binary) and runs on Metal (macOS), Vulkan (Linux/Windows), or DX12 (Windows) via wgpu-native.
 
 ## Usage
 
@@ -76,38 +94,79 @@ broccolini [options] -in <input> -ref <reference> -out <output>
 
 The `examples/` folder includes skull-stripped brain images for testing:
 
-- `EPI_brain.nii.gz` — Functional (EPI) volume (80x80x32, 3mm)
-- `t1_brain.nii.gz` — Structural (T1) volume (181x217x181, 1mm)
+- `EPI_brain.nii.gz` — Functional (EPI) volume (64x64x33, 3mm)
+- `t1_brain.nii.gz` — Structural (T1) volume (128x181x175, 1mm)
+- `MNI152_T1_2mm_brain.nii.gz` — MNI template at 2mm resolution (91x109x91)
 - `MNI152_T1_1mm_brain.nii.gz` — MNI template at 1mm resolution (182x218x182)
 
-Pre-computed reference outputs are in `examples/metal/` and `examples/opencl/`.
+Pre-computed reference outputs are in `examples/metal/`, `examples/opencl/`, and `examples/webgpu/`.
 
-**Reproduce all example outputs** (saved to `examples/out/`):
+**Run all tests for a backend:**
 
 ```bash
-mkdir -p examples/out
+cd examples
+bash run_tests.sh metal    # or opencl, webgpu
+```
 
-# EPI to T1 registration (affine, ~0.3s)
+This builds broccolini, runs 5 registration tests (EPI→T1 linear, T1→MNI 2mm linear/nonlinear, T1→MNI 1mm linear/nonlinear), and saves outputs to `examples/<backend>/`.
+
+**Individual examples:**
+
+```bash
+# EPI to T1 registration (affine)
 ./broccolini \
   -in examples/EPI_brain.nii.gz \
   -ref examples/t1_brain.nii.gz \
-  -out examples/out/epi_t1_aligned.nii.gz \
-  -dof 12 -lineariter 20 -coarsestscale 8 -zcut 30
+  -out /tmp/epi_t1_aligned.nii.gz \
+  -omat /tmp/epi_t1_params.txt -verbose
 
-# T1 to MNI with nonlinear registration (~1s)
+# T1 to MNI 2mm with nonlinear registration
+./broccolini \
+  -in examples/t1_brain.nii.gz \
+  -ref examples/MNI152_T1_2mm_brain.nii.gz \
+  -out /tmp/t1_mni_2mm_nonlinear.nii.gz \
+  -nonlineariter 5 -coarsestscale 4 -zcut 30 \
+  -ofield /tmp/t1_mni_2mm_disp -verbose
+
+# T1 to MNI 1mm with nonlinear registration
 ./broccolini \
   -in examples/t1_brain.nii.gz \
   -ref examples/MNI152_T1_1mm_brain.nii.gz \
-  -out examples/out/t1_mni_1mm_aligned_nonlinear.nii.gz \
-  -lineariter 10 -nonlineariter 5 -coarsestscale 8 -zcut 30
+  -out /tmp/t1_mni_1mm_nonlinear.nii.gz \
+  -nonlineariter 5 -coarsestscale 8 -zcut 30 -verbose
 ```
 
-Compare your outputs against the reference for your backend (Metal on macOS, OpenCL on Linux):
+**Compare outputs across backends** (run from `src/`):
 
 ```bash
-# Should match examples/metal/ (Metal) or examples/opencl/ (OpenCL)
-ls examples/out/
+python3 compare_backends.py          # compare both standalone and library outputs
+python3 compare_backends.py --standalone   # standalone only
+python3 compare_backends.py --library      # Python library outputs only
 ```
+
+### Benchmarks
+
+Measured on Apple M4 (macOS 15.4). Wall-clock time and peak resident memory.
+
+| Task | Metal | OpenCL | WebGPU |
+|------|-------|--------|--------|
+| EPI to T1 (affine) | 0.8s / 232 MB | 1.1s / 162 MB | 1.4s / 207 MB |
+| T1 to MNI 2mm (nonlinear) | 0.7s / 161 MB | 1.6s / 158 MB | 3.6s / 99 MB |
+| T1 to MNI 1mm (nonlinear) | 1.9s / 798 MB | 2.6s / 234 MB | 6.4s / 411 MB |
+
+Cross-backend NCC (normalized cross-correlation) and HF variance (mean |v[i] - v[i-1]| over consecutive non-zero voxels — higher = more preserved high-frequency detail):
+
+| Task | Metal vs OpenCL | Metal vs WebGPU | OpenCL vs WebGPU |
+|------|----------------|-----------------|------------------|
+| EPI to T1 | 0.9997 | 1.0000 | 0.9997 |
+| T1 to MNI 2mm nonlinear | 0.9982 | 1.0000 | 0.9982 |
+| T1 to MNI 1mm nonlinear | 0.9970 | 1.0000 | 0.9970 |
+
+| Task | Metal HF | OpenCL HF | WebGPU HF |
+|------|----------|-----------|-----------|
+| EPI to T1 | 26.2 | 26.3 | 26.2 |
+| T1 to MNI 2mm nonlinear | 25.6 | 25.6 | 25.6 |
+| T1 to MNI 1mm nonlinear | 16.9 | 16.9 | 16.9 |
 
 ## Filter files
 
@@ -139,13 +198,16 @@ src/
     broccoli_constants.h   — Constants
     Eigen/                 — Bundled Eigen (header-only)
     kernels/               — OpenCL kernel source files
+  webgpu/              — WebGPU backend (cross-platform via wgpu-native)
+    webgpu_backend.h/cpp   — C vtable adapter
+    webgpu_registration.h/cpp — WebGPU/WGSL GPU implementation
 ```
 
 ## Architecture
 
-The executable uses a backend vtable pattern: `main.c` is pure C and calls a backend-agnostic `register_volumes()` function pointer. Each backend provides a factory function (`broc_metal_create_backend()` or `broc_opencl_create_backend()`) that returns the vtable.
+The executable uses a backend vtable pattern: `main.c` is pure C and calls a backend-agnostic `register_volumes()` function pointer. Each backend provides a factory function (`broc_metal_create_backend()`, `broc_opencl_create_backend()`, or `broc_webgpu_create_backend()`) that returns the vtable.
 
-Adding a new backend (CUDA, WebGPU, etc.) requires:
+Adding a new backend (e.g. CUDA) requires:
 1. Create `src/<backend>/<backend>_backend.{h,cpp}`
 2. Implement the `broc_backend` vtable
 3. Add `#ifdef HAVE_<BACKEND>` to `registration.h`

@@ -116,8 +116,12 @@ static broc_result metal_register_volumes(
     result.out_D = ref_dims.D;
 
     /* Copy aligned volume */
+    if ((int)out_vol.size() != vol_size) {
+        /* Size mismatch — return failure (aligned == NULL) */
+        return result;
+    }
     result.aligned = (float *)malloc(vol_size * sizeof(float));
-    if (result.aligned && (int)out_vol.size() == vol_size)
+    if (result.aligned)
         memcpy(result.aligned, out_vol.data(), vol_size * sizeof(float));
 
     /* Convert 12 params to 4x4 matrix */
@@ -128,9 +132,14 @@ static broc_result metal_register_volumes(
         result.disp_x = (float *)malloc(vol_size * sizeof(float));
         result.disp_y = (float *)malloc(vol_size * sizeof(float));
         result.disp_z = (float *)malloc(vol_size * sizeof(float));
-        if (result.disp_x) memcpy(result.disp_x, mr.dispX.data(), vol_size * sizeof(float));
-        if (result.disp_y) memcpy(result.disp_y, mr.dispY.data(), vol_size * sizeof(float));
-        if (result.disp_z) memcpy(result.disp_z, mr.dispZ.data(), vol_size * sizeof(float));
+        if (!result.disp_x || !result.disp_y || !result.disp_z) {
+            free(result.disp_x); free(result.disp_y); free(result.disp_z);
+            result.disp_x = result.disp_y = result.disp_z = NULL;
+        } else {
+            memcpy(result.disp_x, mr.dispX.data(), vol_size * sizeof(float));
+            memcpy(result.disp_y, mr.dispY.data(), vol_size * sizeof(float));
+            memcpy(result.disp_z, mr.dispZ.data(), vol_size * sizeof(float));
+        }
     }
 
     return result;

@@ -12,7 +12,39 @@
 #include "nifti_io.h"
 #include "registration.h"
 
+#include <math.h>
+
 #define BROCCOLINI_VERSION "0.1.0"
+
+/* High-frequency variance metric using Welford's online algorithm.
+ * Scans the volume as a 1D array; for each consecutive pair of non-zero
+ * voxels, computes the absolute intensity difference.  Reports the mean
+ * and standard deviation of these differences as a proxy for retained
+ * high-frequency content. */
+static void print_hf_variance(const char *label, const float *data, int n)
+{
+    int64_t count = 0;
+    double mean = 0.0, m2 = 0.0;
+
+    for (int i = 1; i < n; i++) {
+        if (data[i - 1] == 0.0f || data[i] == 0.0f)
+            continue;
+        double diff = fabs((double)data[i] - (double)data[i - 1]);
+        count++;
+        double delta = diff - mean;
+        mean += delta / (double)count;
+        double delta2 = diff - mean;
+        m2 += delta * delta2;
+    }
+
+    if (count < 2) {
+        printf("  HF variance %-30s: insufficient non-zero pairs\n", label);
+        return;
+    }
+    double stddev = sqrt(m2 / (double)(count - 1));
+    printf("  HF variance %-30s: mean=%.4f  sd=%.4f  (n=%lld)\n",
+           label, mean, stddev, (long long)count);
+}
 
 static void print_usage(void)
 {
@@ -363,6 +395,8 @@ int main(int argc, char *argv[])
     broc_backend *backend = NULL;
 #ifdef HAVE_METAL
     backend = broc_metal_create_backend();
+#elif defined(HAVE_WEBGPU)
+    backend = broc_webgpu_create_backend();
 #elif defined(HAVE_OPENCL)
     backend = broc_opencl_create_backend();
 #endif
@@ -400,6 +434,12 @@ int main(int argc, char *argv[])
 
     if (params.verbose)
         printf("Registration complete.\n");
+
+    /* Print high-frequency variance metric */
+    {
+        int vol_size = result.out_W * result.out_H * result.out_D;
+        print_hf_variance("(aligned output)", result.aligned, vol_size);
+    }
 
     /* Save output volume */
     if (out_file) {

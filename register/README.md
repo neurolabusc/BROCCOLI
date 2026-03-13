@@ -30,7 +30,6 @@ affine registration (10 iterations), then nonlinear morphon-based registration
 (5 iterations per scale). The coarsest scale depends on the template voxel size:
 scale 4 for 2 mm MNI (scales 4/2/1), scale 8 for 1 mm MNI (scales 8/4/2/1).
 
-Per
 NCC vs OpenCL ref = normalized cross-correlation between the Metal and OpenCL
 outputs for the same registration task. Wall times are roughly 3–5× faster than
 OpenCL-via-Metal due to native Metal compute shaders and the following

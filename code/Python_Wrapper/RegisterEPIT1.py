@@ -26,7 +26,7 @@ if __name__ == "__main__":
   parser.add_argument('--filters-parametric-file', type=str, default="../Matlab_Wrapper/filters_for_parametric_registration.mat")
   parser.add_argument('--filters-nonparametric-file', type=str, default="../Matlab_Wrapper/filters_for_nonparametric_registration.mat")
 
-  parser.add_argument('--mm-epi-z-cut', type=int, default=30)
+  parser.add_argument('--mm-epi-z-cut', type=int, default=0)
   parser.add_argument('--show-results', action='store_true')
 
   args = parser.parse_args()

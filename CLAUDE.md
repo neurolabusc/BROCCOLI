@@ -33,7 +33,7 @@ code/
     build.sh                # Build script for macOS (Apple Silicon)
   Bash_Wrapper/             # CLI tools (not our focus)
   Matlab_Wrapper/           # MATLAB interface (not our focus)
-metal-registration/         # Native Metal backend (Stage 2)
+metal-registration/         # Metal Python library (pybind11, Stage 2)
   src/
     shaders/registration.metal  # Metal compute shaders
     metal_registration.mm       # Host code (Objective-C++)
@@ -42,12 +42,40 @@ metal-registration/         # Native Metal backend (Stage 2)
     metal_registration_module.mm  # pybind11 bindings
     validate.py                   # Validation script
   build.sh                      # Build script
+webgpu-registration/        # WebGPU Python library (pure Python via wgpu-py)
+  python/
+    webgpu_registration.py      # WebGPU/WGSL registration (2000+ lines)
+    validate.py                 # Validation script
+src/                        # Standalone broccolini executable
+  main.c                      # CLI parsing, NIfTI I/O, orchestration
+  registration.h/c            # Backend-agnostic C API and shared utilities
+  nifti_io.h/c                # Minimal NIfTI-1/2 reader/writer
+  Makefile                    # Build system (auto-detects Metal/OpenCL/WebGPU)
+  compare_backends.py         # Cross-backend NCC + HF variance comparison
+  metal/                      # Metal backend
+    metal_backend.h/mm          # C vtable adapter
+    metal_registration.h/mm     # Metal GPU implementation
+    shaders/registration.metal  # Compute shaders
+  opencl/                     # OpenCL backend (wraps BROCCOLI_LIB)
+    opencl_backend.h/cpp        # C vtable adapter
+    broccoli_lib.h/cpp          # BROCCOLI OpenCL implementation
+    kernels/                    # OpenCL kernel source files
+  webgpu/                     # WebGPU backend (wgpu-native, WGSL embedded)
+    webgpu_backend.h/cpp        # C vtable adapter
+    webgpu_registration.h/cpp   # WebGPU implementation
+    wgpu-native/                # Symlinks to wgpu headers + library
+  examples/                   # Test data + per-backend reference outputs
+    run_tests.sh                # Run all 5 tests for any backend
+    metal/ opencl/ webgpu/      # Pre-computed reference outputs
 filters/                    # Pre-computed quadrature filters (.bin and .mat)
-register/                   # Test NIfTI images for validation
+register/                   # Test NIfTI images + Python library outputs
   EPI_brain.nii.gz          # Functional (EPI) test image
   t1_brain.nii.gz           # Structural (T1) test image
   MNI152_T1_2mm_brain.nii.gz  # MNI template 2mm
   MNI152_T1_1mm_brain.nii.gz  # MNI template 1mm
+  reference_outputs/        # OpenCL Python library outputs
+  metal_outputs/            # Metal Python library outputs
+  webgpu_outputs/           # WebGPU Python library outputs
 compiled/                   # Pre-compiled binaries (various platforms)
 ```
 
@@ -170,30 +198,83 @@ See `register/README.md` for benchmark results.
 - Memory barriers between separable convolution passes
 - `@autoreleasepool` blocks for prompt Metal buffer deallocation
 
-### Stage 3: Optimization (IN PROGRESS)
-**Objective**: Optimize Metal backend for performance parity or better than OpenCL.
+### Known Issue: Z-Cut Truncates Inferior Brain in Interpolated Output
 
-**Completed optimizations**:
+**Problem**: All backends lose ~30 inferior z-slices in the interpolated/aligned outputs.
+The `MM_T1_Z_CUT` parameter (default 30mm) is applied by `CopyVolumeToNew` during
+`ChangeVolumesResolutionAndSize`, which shifts the source z-index by `round(MM_Z_CUT/voxelSizeZ)`.
+This is intended to exclude neck/jaw tissue from *registration*, but the truncation persists
+in the output volumes because the interpolated output is read back from the already-z-cut buffer.
+
+**Flow** (in `PerformRegistrationTwoVolumesWrapper`, `broccoli_lib.cpp:7980`):
+1. `ChangeVolumesResolutionAndSize` (line 8017): resamples T1 → MNI space with z-cut applied
+2. `MatchVolumeMasses` (line 8020): translates volume to align centers-of-mass
+3. `h_Interpolated_T1_Volume` read back (line 8023): already has z-cut + COM shift baked in
+
+**Texture sampler interaction** — `MatchVolumeMasses` uses `TransformVolumesLinear` which
+reads from a GPU texture. The COM translation can push reads outside the volume bounds:
+- **OpenCL** (`CLK_ADDRESS_CLAMP_TO_EDGE`): out-of-bounds reads repeat the edge slice,
+  producing identical repeated slices in the inferior region (visible as constant-sum slices)
+- **Metal** (`address::clamp_to_zero`): out-of-bounds reads return 0 (clean zeros)
+- **WebGPU** (bounds-check emulation): same as Metal (zeros)
+
+**Impact**: For `t1_crop → MNI 1mm` (where input ≈ MNI with 2 fewer y-rows), the z-cut
+removes cerebellum/brainstem data unnecessarily. With 1mm isotropic voxels, slices k=0–26
+are either zero (Metal/WebGPU) or repeated-edge (OpenCL), and k≥152 are zero (all backends).
+
+**IMPORTANT for future changes**: Any new backend or refactoring must be aware that
+`CopyVolumeToNew` applies `MM_Z_CUT` as a source z-offset, and all texture samplers
+should use `clamp_to_zero` (not `clamp_to_edge`) to avoid edge-replication artifacts.
+The OpenCL `CLK_ADDRESS_CLAMP_TO_EDGE` is a legacy bug that should eventually be fixed.
+
+### Stage 3: Optimization & Standalone Executable (COMPLETE)
+**Objective**: Optimize Metal backend; create standalone `broccolini` executable with
+Metal, OpenCL, and WebGPU backends; fix high-frequency preservation across all backends.
+
+**Metal optimizations** (in `metal-registration/`):
 1. Full 3D texture convolution kernel — single dispatch replaces 7-pass z-slice loop
 2. Command buffer batching — phase/grad/Amat 3-direction loop in single CB
 3. Batched smoothing — multiple in-place smoothings share one CB with pre-allocated temps
 4. Encoder-level helpers — fill/add/multiply encode inline instead of standalone CBs
 5. Batched tensor/Amat loops in nonlinear registration
 
-**Results**: 1.4–2× speedup over unoptimized Metal (3–5× faster than OpenCL-via-Metal).
-All NCC values unchanged. See `register/README.md` for updated benchmarks.
+**Standalone executable** (`src/`):
+- `broccolini` CLI with pluggable backend vtable (Metal, OpenCL, WebGPU)
+- Build: `cd src && make BACKEND=metal` (or `opencl`, `webgpu`)
+- Tests: `cd src/examples && bash run_tests.sh metal`
+- Compare: `cd src && python3 compare_backends.py`
+
+**Single-step interpolation fix** (all backends):
+- OpenCL re-rescales the original T1 from scratch and applies the combined COM+affine
+  (or COM+affine+nonlinear displacement) in a single interpolation step, avoiding
+  compounded trilinear blur (see `broccoli_lib.cpp:8049` comment: "Do total interpolation
+  in one step, to reduce smoothness").
+- Metal and WebGPU originally chained 3-4 interpolation passes, losing high-frequency detail.
+- Fix: after `alignTwoVolumesLinearSeveralScales`, compose COM shift into registration params
+  via `composeAffineParams(regParams, initParams)`, then re-rescale original T1 and apply
+  the combined transform in one step. Applied to all 4 implementations:
+  - `src/metal/metal_registration.mm` (standalone Metal)
+  - `src/webgpu/webgpu_registration.cpp` (standalone WebGPU)
+  - `metal-registration/src/metal_registration.mm` (pybind11 Metal library)
+  - `webgpu-registration/python/webgpu_registration.py` (Python WebGPU library)
+- COM translation rounded to integers (`roundf`) in all backends to match OpenCL's `myround`
+
+**Benchmarks** (Apple M4, macOS 15.4):
+
+| Task | Metal | OpenCL | WebGPU |
+|------|-------|--------|--------|
+| EPI to T1 (affine) | 0.8s / 232 MB | 1.1s / 162 MB | 1.4s / 207 MB |
+| T1 to MNI 2mm (nonlinear) | 0.7s / 161 MB | 1.6s / 158 MB | 3.6s / 99 MB |
+| T1 to MNI 1mm (nonlinear) | 1.9s / 798 MB | 2.6s / 234 MB | 6.4s / 411 MB |
+
+Cross-backend NCC: 0.997–1.000. HF variance matches across all backends.
 
 **FFT convolution evaluation (USE_FFT=1)**:
 - MPSGraph FFT path implemented as compile-time option (`USE_FFT=1 bash build.sh`)
-- Produces numerically equivalent results to spatial path
-- **Spatial texture3D wins at all tested sizes** — even at 58M voxels (0.5mm MNI), spatial is 11.6× faster
-- FFT bottleneck: CPU-side padding and readback every convolution call (600ms pad + 4s exec + 1-3s readback vs 170ms spatial)
-- Would need GPU-side padding and zero-copy to compete; 7×7×7 kernel is inherently spatial-friendly
-
-**Large volume benchmark** (t1_head 0.8mm → MNI 0.5mm, 58M voxels):
-- Spatial: 12.9s, NCC 0.869 — registration works without brain masks (mask only used for skull-stripped output)
-- FFT: 150s, NCC 0.869
+- **Spatial texture3D wins at all tested sizes** — even at 58M voxels, spatial is 11.6× faster
+- 7×7×7 kernel is inherently spatial-friendly
 
 **Remaining opportunities**:
 - SIMD shuffle / threadgroup memory for separable smoothing
 - Memory optimization (1240 MB for 1mm — 24 filter response buffers allocated upfront)
+- Unify `src/metal/` and `metal-registration/src/` to eliminate forked Metal implementation

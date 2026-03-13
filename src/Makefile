@@ -1,9 +1,10 @@
 # Makefile for broccolini — standalone spatial normalization executable
 #
 # Usage:
-#   make              # auto-detect (Metal on macOS, OpenCL elsewhere)
+#   make                # auto-detect (Metal on macOS, OpenCL elsewhere)
 #   make BACKEND=metal
 #   make BACKEND=opencl
+#   make BACKEND=webgpu
 #   make clean
 
 # ---------- Auto-detect platform and backend ----------
@@ -66,8 +67,14 @@ ifeq ($(BACKEND),opencl)
   OPENCL_SRCS = opencl/opencl_backend.cpp opencl/broccoli_lib.cpp
   OPENCL_OBJS = $(BUILDDIR)/opencl_backend.o $(BUILDDIR)/broccoli_lib.o
 
-  OPENCL_CXXFLAGS = $(CXXFLAGS) $(DEFINES) \
-    -I. -Iopencl -I$(OPENCL_HEADERS)
+  ifeq ($(UNAME),Darwin)
+    CLBLAS_DIR ?= $(CURDIR)/../code/BROCCOLI_LIB/clBLASMac
+  else
+    CLBLAS_DIR ?= $(CURDIR)/../code/BROCCOLI_LIB/clBLASLinux
+  endif
+
+  OPENCL_CXXFLAGS = -O2 -std=c++14 -Wall -Wextra -Wno-unused-parameter -Wno-narrowing -w $(DEFINES) \
+    -I. -Iopencl -I$(OPENCL_HEADERS) -I$(CLBLAS_DIR)
 
   LDFLAGS += -lz $(OPENCL_LDFLAGS)
   ifeq ($(UNAME),Darwin)
@@ -75,6 +82,35 @@ ifeq ($(BACKEND),opencl)
   endif
 
   ALL_OBJS = $(C_OBJS) $(OPENCL_OBJS)
+endif
+
+# ---------- WebGPU backend (cross-platform via wgpu-native) ----------
+
+ifeq ($(BACKEND),webgpu)
+  DEFINES  = -DHAVE_WEBGPU -DHAVE_ZLIB
+
+  # wgpu-native installation: headers + library
+  # Download from https://github.com/gfx-rs/wgpu-native/releases
+  # Set WGPU_DIR to the extracted directory (contains include/ and lib/)
+  WGPU_DIR ?= /usr/local
+  WGPU_INCLUDE = $(WGPU_DIR)/include
+  WGPU_LIB     = $(WGPU_DIR)/lib
+
+  WEBGPU_SRCS = webgpu/webgpu_backend.cpp webgpu/webgpu_registration.cpp
+  WEBGPU_OBJS = $(BUILDDIR)/webgpu_backend.o $(BUILDDIR)/webgpu_registration.o
+
+  WEBGPU_CXXFLAGS = $(CXXFLAGS) $(DEFINES) \
+    -I. -Iwebgpu -I$(WGPU_INCLUDE)
+
+  LDFLAGS += -lz -L$(WGPU_LIB) -lwgpu_native -Wl,-rpath,$(WGPU_LIB)
+  ifeq ($(UNAME),Darwin)
+    LDFLAGS += -framework Metal -framework QuartzCore -framework CoreGraphics
+  endif
+  ifeq ($(UNAME),Linux)
+    LDFLAGS += -lm -ldl -lpthread
+  endif
+
+  ALL_OBJS = $(C_OBJS) $(WEBGPU_OBJS)
 endif
 
 # ---------- Rules ----------
@@ -123,6 +159,13 @@ $(BUILDDIR)/opencl_backend.o: opencl/opencl_backend.cpp
 
 $(BUILDDIR)/broccoli_lib.o: opencl/broccoli_lib.cpp
 	$(CXX) $(OPENCL_CXXFLAGS) -fPIC -c $< -o $@
+
+# WebGPU backend
+$(BUILDDIR)/webgpu_backend.o: webgpu/webgpu_backend.cpp
+	$(CXX) $(WEBGPU_CXXFLAGS) -c $< -o $@
+
+$(BUILDDIR)/webgpu_registration.o: webgpu/webgpu_registration.cpp
+	$(CXX) $(WEBGPU_CXXFLAGS) -c $< -o $@
 
 clean:
 	rm -rf $(BUILDDIR) $(TARGET)

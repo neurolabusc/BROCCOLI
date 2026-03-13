@@ -350,6 +350,9 @@ void BROCCOLI_LIB::SetStartValues()
 
 	NUMBER_OF_IMAGE_REGISTRATION_PARAMETERS = 12;
 
+	MM_T1_Z_CUT = INITIAL_MM_T1_Z_CUT;
+	MM_EPI_Z_CUT = INITIAL_MM_T1_Z_CUT;
+
 	TSIGMA = 5.0;
 	ESIGMA = 5.0;
 	DSIGMA = 5.0;
@@ -6973,6 +6976,9 @@ void BROCCOLI_LIB::ChangeVolumesResolutionAndSize(cl_mem d_New_Volumes,
 		                                          int INTERPOLATION_MODE,
 		                                          int offset)
 {
+	// Treat negative MM_Z_CUT as disabled (no z-cut)
+	if (MM_Z_CUT < 0) MM_Z_CUT = 0;
+
 	// Calculate volume size for the same voxel size
 	int DATA_W_INTERPOLATED = (int)myround((float)DATA_W * VOXEL_SIZE_X / NEW_VOXEL_SIZE_X);
 	int DATA_H_INTERPOLATED = (int)myround((float)DATA_H * VOXEL_SIZE_Y / NEW_VOXEL_SIZE_Y);
